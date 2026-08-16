@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>imgdedup</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div id="tabs"></div>
+<div id="layout">
+  <div id="sidebar">
+    <div id="grouplist"></div>
+    <div id="carousel">
+      <img id="carousel-img" alt="">
+      <div id="carousel-label"></div>
+    </div>
+  </div>
+  <div id="main">
+    <div id="main-header">
+      <span id="group-title"></span>
+      <button id="btn-ignore" disabled>Ignore</button>
+      <button id="btn-complete" disabled>Complete</button>
+    </div>
+    <div id="rows"></div>
+  </div>
+</div>
+<div id="modal" class="hidden">
+  <div id="modal-box">
+    <div id="modal-text"></div>
+    <img id="modal-img" alt="">
+    <input id="modal-input" type="text">
+    <div id="modal-buttons">
+      <button id="modal-ok">OK</button>
+      <button id="modal-cancel">Cancel</button>
+    </div>
+  </div>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>
