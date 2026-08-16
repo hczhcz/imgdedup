@@ -90,20 +90,58 @@ async function loadTabs() {
   if (!state.currentTab && state.tabs.length) switchTab(state.tabs[0].name);
 }
 
-function guardLeaveGroup() {
+function showDialog(opts) {
+  return new Promise((resolve) => {
+    $("modal").classList.remove("hidden");
+    $("modal-text").textContent = opts.text;
+    const mi = $("modal-img");
+    if (opts.imgSrc) {
+      mi.classList.remove("hidden");
+      mi.src = opts.imgSrc;
+    } else {
+      mi.classList.add("hidden");
+    }
+    const input = $("modal-input");
+    if (opts.input != null) {
+      input.classList.remove("hidden");
+      input.value = opts.input;
+    } else {
+      input.classList.add("hidden");
+    }
+    $("modal-cancel").classList.toggle("hidden", !opts.cancel);
+    const done = (v) => {
+      $("modal").classList.add("hidden");
+      resolve(v);
+    };
+    $("modal-ok").onclick = () =>
+      done(opts.input != null ? input.value.trim() : true);
+    $("modal-cancel").onclick = () => done(null);
+    input.onkeydown = (ev) => {
+      if (ev.key === "Enter") $("modal-ok").onclick();
+      if (ev.key === "Escape") done(null);
+    };
+    if (opts.input != null) input.focus();
+  });
+}
+
+const showAlert = (text) => showDialog({ text });
+const showConfirm = async (text) =>
+  (await showDialog({ text, cancel: true })) === true;
+
+async function guardLeaveGroup() {
   const dg = state.dupgroup;
   if (!dg || !dg.hasOperations) return true;
   const present = dg.files.filter((f) => f.status === "present");
   if (dg.keep_no_gap && !dg.gaps_ok && present.length === 1)
-    return window.confirm(
+    return showConfirm(
       "This group leaves a gap in the sequence. Leave anyway?");
-  alert("This group has unfinished operations. Complete or ignore it before leaving.");
+  await showAlert("This group has unfinished operations. Complete or ignore it before leaving.");
   return false;
 }
 
-function switchTab(name) {
+async function switchTab(name) {
   if (name === state.currentTab) return;
-  if (!guardLeaveGroup()) return;
+  if (!(await guardLeaveGroup())) return;
   state.currentTab = name;
   state.listJson = null;
   state.currentGid = null;
@@ -155,7 +193,14 @@ function listSource(mode) {
 function renderGroupList() {
   for (const b of $("list-tabs").querySelectorAll("button")) {
     const label = b.dataset.mode[0].toUpperCase() + b.dataset.mode.slice(1);
-    b.textContent = `${label} (${listSource(b.dataset.mode).length})`;
+    b.textContent = label;
+    const n = listSource(b.dataset.mode).length;
+    if (n) {
+      const badge = document.createElement("span");
+      badge.className = "count-badge";
+      badge.textContent = n;
+      b.appendChild(badge);
+    }
   }
   const el = $("grouplist");
   const stick = el.scrollTop + el.clientHeight >= el.scrollHeight - 10;
@@ -210,7 +255,7 @@ function renderGroupList() {
 
 async function selectGroup(gid, fromAuto) {
   if (state.currentGid !== null && gid !== state.currentGid && !fromAuto) {
-    if (!guardLeaveGroup()) return;
+    if (!(await guardLeaveGroup())) return;
   }
   state.currentGid = gid;
   const working = loadStored("working", null);
@@ -227,8 +272,8 @@ async function selectGroup(gid, fromAuto) {
   rows.scrollTop = rows.scrollHeight;
 }
 
-function selectStoredGroup(group) {
-  if (!guardLeaveGroup()) return;
+async function selectStoredGroup(group) {
+  if (!(await guardLeaveGroup())) return;
   state.currentGid = group.id;
   state.dupgroup = structuredClone(group);
   state.dupJson = null;
@@ -466,64 +511,85 @@ function renderRow(dg, f, dupMd5s) {
     em.textContent = "exact duplicate (same md5)";
     side.appendChild(em);
   }
-  const meta = document.createElement("div");
-  meta.className = "meta";
-  meta.textContent = `${fmtSize(f.size)} · ${fmtDate(f.mtime)}`;
-  side.appendChild(meta);
-  const dim = document.createElement("div");
-  dim.className = "meta dim";
-  side.appendChild(dim);
+  const maxSize = Math.max(...dg.files.map((x) => x.size || 0));
+  const mDate = document.createElement("div");
+  mDate.className = "meta";
+  mDate.textContent = fmtDate(f.mtime);
+  side.appendChild(mDate);
+  const mSize = document.createElement("div");
+  mSize.className = "meta" + (f.size && f.size === maxSize ? " max-val" : "");
+  mSize.textContent = fmtSize(f.size);
+  side.appendChild(mSize);
+  const mDim = document.createElement("div");
+  mDim.className = "meta dim";
+  mDim.textContent = "? × ?";
+  side.appendChild(mDim);
   if (src) {
     const infoParams = { group: state.currentTab, loc: src.loc, path: src.path };
     if (src.kind) infoParams.kind = src.kind;
     api("/api/imageinfo", infoParams).then((info) => {
-      if (info.width) dim.textContent = `${info.width} × ${info.height}`;
+      if (info.width) {
+        f.width = info.width;
+        f.height = info.height;
+        mDim.textContent = `${info.width} × ${info.height}`;
+        const areas = dg.files.map((x) => (x.width || 0) * (x.height || 0));
+        const maxArea = Math.max(...areas);
+        for (const el of document.querySelectorAll(".dup-row .dim"))
+          el.classList.remove("max-val");
+        dg.files.forEach((x, i) => {
+          const el = document.querySelectorAll(".dup-row .dim")[i];
+          if (el && maxArea > 0 && x.width * x.height === maxArea)
+            el.classList.add("max-val");
+        });
+      }
     });
   }
 
   const actions = document.createElement("div");
   actions.className = "actions";
   const present = f.status === "present";
+  const inRepo = f.status === "in_repo";
   const idx = dg.files.indexOf(f);
   const prevSlot = dg.files.slice(0, idx).reverse().find((x) => x.status === "in_repo");
   const nextSlot = dg.files.slice(idx + 1).find((x) => x.status === "in_repo");
 
-  const bMove = document.createElement("button");
-  bMove.className = "danger";
-  bMove.textContent = "Move to dup repo";
-  bMove.disabled = !present;
-  bMove.onclick = () => moveToRepo(f, null);
-  actions.appendChild(bMove);
+  const bMain = document.createElement("button");
+  if (inRepo) {
+    bMain.textContent = "Restore from dup repo";
+    bMain.onclick = () => doAction("/api/restore", {
+      ...identity(f), repo_name: f.repo_path,
+    });
+  } else {
+    bMain.className = "danger";
+    bMain.textContent = "Move to dup repo";
+    bMain.disabled = !present;
+    bMain.onclick = () => moveToRepo(f, null);
+  }
+  actions.appendChild(bMain);
 
-  const bRestore = document.createElement("button");
-  bRestore.textContent = "Restore from dup repo";
-  bRestore.disabled = f.status !== "in_repo";
-  bRestore.onclick = () => doAction("/api/restore", {
-    ...identity(f), repo_name: f.repo_path,
-  });
-  actions.appendChild(bRestore);
-
+  const slotRow = document.createElement("div");
+  slotRow.className = "slot-row";
   const bPrev = document.createElement("button");
-  bPrev.textContent = "Move to prev slot";
+  bPrev.textContent = "\u2191 prev slot";
   bPrev.disabled = !present || !prevSlot;
   if (prevSlot) {
-    bPrev.title = prevSlot.rel_path;
+    bPrev.title = "Move to " + prevSlot.rel_path;
     bPrev.onclick = () => doAction("/api/move", {
       ...identity(f), target: prevSlot.rel_path,
     });
   }
-  actions.appendChild(bPrev);
-
+  slotRow.appendChild(bPrev);
   const bNext = document.createElement("button");
-  bNext.textContent = "Move to next slot";
+  bNext.textContent = "\u2193 next slot";
   bNext.disabled = !present || !nextSlot;
   if (nextSlot) {
-    bNext.title = nextSlot.rel_path;
+    bNext.title = "Move to " + nextSlot.rel_path;
     bNext.onclick = () => doAction("/api/move", {
       ...identity(f), target: nextSlot.rel_path,
     });
   }
-  actions.appendChild(bNext);
+  slotRow.appendChild(bNext);
+  actions.appendChild(slotRow);
 
   side.appendChild(actions);
   row.appendChild(side);
@@ -534,7 +600,7 @@ async function doAction(path, extra) {
   const body = { group: state.currentTab, ...extra };
   const res = await apiPost(path, body);
   if (res.error) {
-    alert(`${res.error}: ${res.message}`);
+    await showAlert(`${res.error}: ${res.message}`);
     return;
   }
   state.dupgroup.hasOperations = true;
@@ -558,12 +624,19 @@ async function moveToRepo(file, name) {
   const res = await apiPost("/api/move_to_repo", body);
   if (res.error === "dst_exists") {
     const conflict = name || file.rel_path.split("/").pop();
-    showRenameModal(conflict, res.repo_kind || "fuzzy",
-      (newName) => moveToRepo(file, newName));
+    const kind = res.repo_kind || "fuzzy";
+    const newName = await showDialog({
+      text: `A file named "${conflict}" already exists in the ${kind} dup repo (shown below). Enter a different name:`,
+      imgSrc: "/api/image?" + new URLSearchParams(
+        { group: state.currentTab, loc: "repo", kind, path: conflict, t: Date.now() }),
+      input: conflict,
+      cancel: true,
+    });
+    if (newName) moveToRepo(file, newName);
     return;
   }
   if (res.error) {
-    alert(`${res.error}: ${res.message}`);
+    await showAlert(`${res.error}: ${res.message}`);
     return;
   }
   file.repo_path = body.repo_name;
@@ -572,34 +645,6 @@ async function moveToRepo(file, name) {
   await refreshWorkingFiles();
   state.listJson = null;
   await pollState(true);
-}
-
-function showRenameModal(conflictName, repoKind, onOk) {
-  $("modal").classList.remove("hidden");
-  $("modal-text").textContent =
-    `A file named "${conflictName}" already exists in the ${repoKind} dup repo (shown below). Enter a different name:`;
-  const mi = $("modal-img");
-  mi.classList.remove("hidden");
-  mi.src = "/api/image?" + new URLSearchParams(
-    { group: state.currentTab, loc: "repo", kind: repoKind, path: conflictName, t: Date.now() });
-  const input = $("modal-input");
-  input.classList.remove("hidden");
-  input.value = conflictName;
-  input.focus();
-  $("modal-ok").onclick = () => {
-    const v = input.value.trim();
-    hideModal();
-    if (v) onOk(v);
-  };
-  $("modal-cancel").onclick = hideModal;
-  input.onkeydown = (ev) => {
-    if (ev.key === "Enter") $("modal-ok").onclick();
-    if (ev.key === "Escape") hideModal();
-  };
-}
-
-function hideModal() {
-  $("modal").classList.add("hidden");
 }
 
 function renderCarousel() {
@@ -645,14 +690,14 @@ function applyCarouselView() {
 $("btn-ignore").onclick = async () => {
   const dg = state.dupgroup;
   if (!dg || !dg.can_ignore) return;
-  if (!window.confirm(
-    "Ignore this group? It will be hidden until its members change."))
+  if (!(await showConfirm(
+    "Ignore this group? It will be hidden until its members change.")))
     return;
   const md5s = [...new Set(dg.files.filter((f) => f.status === "present" && f.md5).map((f) => f.md5))];
   if (!md5s.length) return;
   const res = await apiPost("/api/ignore", { group: state.currentTab, md5s });
   if (res.error) {
-    alert(`${res.error}: ${res.message}`);
+    await showAlert(`${res.error}: ${res.message}`);
     return;
   }
   localStorage.removeItem(storageKey("working"));
@@ -698,7 +743,6 @@ loadTabs();
 
 for (const button of $("list-tabs").querySelectorAll("button")) {
   button.onclick = () => {
-    if (!guardLeaveGroup()) return;
     state.listMode = button.dataset.mode;
     for (const b of $("list-tabs").querySelectorAll("button"))
       b.classList.toggle("active", b === button);
