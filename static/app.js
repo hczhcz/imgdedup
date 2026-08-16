@@ -647,44 +647,63 @@ async function moveToRepo(file, name) {
   await pollState(true);
 }
 
+function carouselImgs() {
+  return [...document.querySelectorAll(".carousel-img")];
+}
+
+function carouselShow(el) {
+  for (const img of carouselImgs())
+    img.classList.toggle("front", img === el);
+}
+
 function renderCarousel() {
   const dg = state.dupgroup;
-  const img = $("carousel-img");
   const label = $("carousel-label");
+  const imgs = carouselImgs();
   if (!dg || !dg.files.length) {
-    img.style.display = "none";
+    carouselShow(null);
     label.textContent = "";
     return;
   }
   const candidates = dg.files.filter((f) => fileImageLoc(f));
   if (!candidates.length) {
-    img.style.display = "none";
+    carouselShow(null);
     label.textContent = "no images";
     return;
   }
   const f = candidates[state.carouselIdx % candidates.length];
   const src = fileImageLoc(f);
   const url = imgUrl(src.loc, src.path, f.mtime || "", src.kind);
-  img.style.display = "";
-  if (img.dataset.src !== url) {
-    img.dataset.src = url;
-    img.src = url;
-    img.onload = applyCarouselView;
-  } else {
-    applyCarouselView();
-  }
   label.textContent = f.rel_path;
+  const ready = imgs.find((i) => i.dataset.src === url);
+  if (ready) {
+    if (ready.complete && ready.naturalWidth) {
+      applyCarouselView(ready);
+      carouselShow(ready);
+    }
+    return;
+  }
+  const back = imgs.find((i) => !i.classList.contains("front")) || imgs[0];
+  back.dataset.src = url;
+  back.onload = () => {
+    if (back.dataset.src !== url) return;
+    applyCarouselView(back);
+    carouselShow(back);
+  };
+  back.src = url;
 }
 
-function applyCarouselView() {
-  const img = $("carousel-img");
+function applyCarouselView(img) {
+  const targets = img ? [img] : carouselImgs();
   const vp = $("carousel-view");
-  if (!img.naturalWidth) return;
-  const vw = vp.clientWidth, vh = vp.clientHeight;
-  const s = Math.min(vw / img.naturalWidth, vh / img.naturalHeight);
-  const cx = (vw - img.naturalWidth * s) / 2;
-  const cy = (vh - img.naturalHeight * s) / 2;
-  img.style.transform = `translate(${cx}px, ${cy}px) scale(${s})`;
+  for (const t of targets) {
+    if (!t.naturalWidth) continue;
+    const vw = vp.clientWidth, vh = vp.clientHeight;
+    const s = Math.min(vw / t.naturalWidth, vh / t.naturalHeight);
+    const cx = (vw - t.naturalWidth * s) / 2;
+    const cy = (vh - t.naturalHeight * s) / 2;
+    t.style.transform = `translate(${cx}px, ${cy}px) scale(${s})`;
+  }
 }
 
 $("btn-ignore").onclick = async () => {
@@ -736,6 +755,11 @@ setInterval(() => {
     renderCarousel();
   }
 }, 500);
+
+window.addEventListener("resize", () => {
+  applyViewAll();
+  applyCarouselView();
+});
 
 setInterval(() => pollState(false), 1000);
 
