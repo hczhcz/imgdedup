@@ -146,13 +146,21 @@ async function pollState(force) {
   }
 }
 
+function listSource(mode) {
+  return mode === "completed" ? completedGroups() :
+    mode === "ignored" ? state.ignored :
+    mode === "old" ? state.old : state.groups;
+}
+
 function renderGroupList() {
+  for (const b of $("list-tabs").querySelectorAll("button")) {
+    const label = b.dataset.mode[0].toUpperCase() + b.dataset.mode.slice(1);
+    b.textContent = `${label} (${listSource(b.dataset.mode).length})`;
+  }
   const el = $("grouplist");
   const stick = el.scrollTop + el.clientHeight >= el.scrollHeight - 10;
   el.innerHTML = "";
-  const source = state.listMode === "completed" ? completedGroups() :
-    state.listMode === "ignored" ? state.ignored :
-    state.listMode === "old" ? state.old : state.groups;
+  const source = listSource(state.listMode);
   for (const g of source) {
     const div = document.createElement("div");
     div.className = "group-item" + (g.id === state.currentGid ? " active" : "");
@@ -168,7 +176,7 @@ function renderGroupList() {
       row.className = "gfile st-" + f.status;
       const nm = document.createElement("span");
       nm.className = "fname";
-      nm.textContent = f.name;
+      nm.textContent = f.rel_path;
       nm.title = f.rel_path;
       const sz = document.createElement("span");
       sz.textContent = fmtSize(f.size);
@@ -383,7 +391,11 @@ function renderMain() {
   const stick = rows.scrollTop + rows.clientHeight >= rows.scrollHeight - 10;
   rows.innerHTML = "";
   if (!dg) { renderCarousel(); return; }
-  for (const f of dg.files) rows.appendChild(renderRow(dg, f));
+  const md5Counts = {};
+  for (const f of dg.files)
+    if (f.md5) md5Counts[f.md5] = (md5Counts[f.md5] || 0) + 1;
+  const dupMd5s = new Set(Object.keys(md5Counts).filter((m) => md5Counts[m] >= 2));
+  for (const f of dg.files) rows.appendChild(renderRow(dg, f, dupMd5s));
   if (stick) rows.scrollTop = rows.scrollHeight;
   renderCarousel();
 }
@@ -414,9 +426,9 @@ function renderNeighborCol(neighbors) {
   return col;
 }
 
-function renderRow(dg, f) {
+function renderRow(dg, f, dupMd5s) {
   const row = document.createElement("div");
-  row.className = "dup-row";
+  row.className = "dup-row" + (f.md5 && dupMd5s.has(f.md5) ? " md5-dup" : "");
   row.appendChild(renderNeighborCol(f.neighbors_prev));
 
   const vp = document.createElement("div");
@@ -446,8 +458,14 @@ function renderRow(dg, f) {
   side.appendChild(p);
   const st = document.createElement("div");
   st.className = "status status-" + f.status;
-  st.textContent = f.status + (f.repo_path ? ` (repo: ${f.repo_path})` : "");
+  st.textContent = f.status + (f.repo_path ? ` (dup repo: ${f.repo_path})` : "");
   side.appendChild(st);
+  if (f.md5 && dupMd5s.has(f.md5)) {
+    const em = document.createElement("div");
+    em.className = "md5-flag";
+    em.textContent = "exact duplicate (same md5)";
+    side.appendChild(em);
+  }
   const meta = document.createElement("div");
   meta.className = "meta";
   meta.textContent = `${fmtSize(f.size)} · ${fmtDate(f.mtime)}`;
@@ -465,44 +483,48 @@ function renderRow(dg, f) {
 
   const actions = document.createElement("div");
   actions.className = "actions";
-  if (f.status === "present") {
-    const b = document.createElement("button");
-    b.className = "danger";
-    b.textContent = "Move to repo";
-    b.onclick = () => moveToRepo(f, null);
-    actions.appendChild(b);
-  }
-  if (f.status === "in_repo") {
-    const b = document.createElement("button");
-    b.textContent = "Restore";
-    b.onclick = () => doAction("/api/restore", {
-      ...identity(f), repo_name: f.repo_path,
+  const present = f.status === "present";
+  const idx = dg.files.indexOf(f);
+  const prevSlot = dg.files.slice(0, idx).reverse().find((x) => x.status === "in_repo");
+  const nextSlot = dg.files.slice(idx + 1).find((x) => x.status === "in_repo");
+
+  const bMove = document.createElement("button");
+  bMove.className = "danger";
+  bMove.textContent = "Move to dup repo";
+  bMove.disabled = !present;
+  bMove.onclick = () => moveToRepo(f, null);
+  actions.appendChild(bMove);
+
+  const bRestore = document.createElement("button");
+  bRestore.textContent = "Restore from dup repo";
+  bRestore.disabled = f.status !== "in_repo";
+  bRestore.onclick = () => doAction("/api/restore", {
+    ...identity(f), repo_name: f.repo_path,
+  });
+  actions.appendChild(bRestore);
+
+  const bPrev = document.createElement("button");
+  bPrev.textContent = "Move to prev slot";
+  bPrev.disabled = !present || !prevSlot;
+  if (prevSlot) {
+    bPrev.title = prevSlot.rel_path;
+    bPrev.onclick = () => doAction("/api/move", {
+      ...identity(f), target: prevSlot.rel_path,
     });
-    actions.appendChild(b);
   }
-  if (f.status === "present") {
-    const idx = dg.files.indexOf(f);
-    const prevSlot = dg.files.slice(0, idx).reverse().find((x) => x.status === "in_repo");
-    const nextSlot = dg.files.slice(idx + 1).find((x) => x.status === "in_repo");
-    if (prevSlot) {
-      const b = document.createElement("button");
-      b.textContent = "Move to prev slot";
-      b.title = prevSlot.rel_path;
-      b.onclick = () => doAction("/api/move", {
-        ...identity(f), target: prevSlot.rel_path,
-      });
-      actions.appendChild(b);
-    }
-    if (nextSlot) {
-      const b = document.createElement("button");
-      b.textContent = "Move to next slot";
-      b.title = nextSlot.rel_path;
-      b.onclick = () => doAction("/api/move", {
-        ...identity(f), target: nextSlot.rel_path,
-      });
-      actions.appendChild(b);
-    }
+  actions.appendChild(bPrev);
+
+  const bNext = document.createElement("button");
+  bNext.textContent = "Move to next slot";
+  bNext.disabled = !present || !nextSlot;
+  if (nextSlot) {
+    bNext.title = nextSlot.rel_path;
+    bNext.onclick = () => doAction("/api/move", {
+      ...identity(f), target: nextSlot.rel_path,
+    });
   }
+  actions.appendChild(bNext);
+
   side.appendChild(actions);
   row.appendChild(side);
   return row;
@@ -555,7 +577,7 @@ async function moveToRepo(file, name) {
 function showRenameModal(conflictName, repoKind, onOk) {
   $("modal").classList.remove("hidden");
   $("modal-text").textContent =
-    `A file named "${conflictName}" already exists in the ${repoKind} repo (shown below). Enter a different name:`;
+    `A file named "${conflictName}" already exists in the ${repoKind} dup repo (shown below). Enter a different name:`;
   const mi = $("modal-img");
   mi.classList.remove("hidden");
   mi.src = "/api/image?" + new URLSearchParams(
@@ -611,7 +633,7 @@ function renderCarousel() {
 
 function applyCarouselView() {
   const img = $("carousel-img");
-  const vp = $("carousel");
+  const vp = $("carousel-view");
   if (!img.naturalWidth) return;
   const vw = vp.clientWidth, vh = vp.clientHeight;
   const s = Math.min(vw / img.naturalWidth, vh / img.naturalHeight);
@@ -624,7 +646,7 @@ $("btn-ignore").onclick = async () => {
   const dg = state.dupgroup;
   if (!dg || !dg.can_ignore) return;
   if (!window.confirm(
-    "Ignore this group? It will be hidden until a new member appears."))
+    "Ignore this group? It will be hidden until its members change."))
     return;
   const md5s = [...new Set(dg.files.filter((f) => f.status === "present" && f.md5).map((f) => f.md5))];
   if (!md5s.length) return;

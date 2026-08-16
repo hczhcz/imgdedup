@@ -27,14 +27,15 @@ body { display: flex; flex-direction: column; overflow: hidden; }
 .level-VerySmall { color: #5cf; }
 .level-Minimal { color: #59f; }
 .group-item .gfile { display: flex; justify-content: space-between; color: #aaa; }
-.group-item .gfile .fname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 210px; }
+.group-item .gfile .fname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 240px; direction: rtl; text-align: left; }
 .group-item .gfile.st-in_repo { color: #666; text-decoration: line-through; }
 .group-item .gfile.st-missing { color: #a33; }
 .group-item .gfile.st-replaced { color: #3a3; }
 
-#carousel { flex: none; height: 320px; border-top: 1px solid #333; position: relative; overflow: hidden; background: #141414; }
+#carousel { flex: none; height: 320px; border-top: 1px solid #333; display: flex; flex-direction: column; background: #141414; }
+#carousel-view { flex: 1; position: relative; overflow: hidden; min-height: 0; }
 #carousel-img { position: absolute; transform-origin: 0 0; image-rendering: auto; }
-#carousel-label { position: absolute; bottom: 0; left: 0; right: 0; background: rgba(0,0,0,0.6); font-size: 11px; padding: 2px 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#carousel-label { flex: none; background: #000; font-size: 11px; padding: 2px 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 #main { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 #main-header { flex: none; padding: 8px 12px; background: #111; border-bottom: 1px solid #333; display: flex; align-items: center; gap: 12px; }
@@ -46,7 +47,9 @@ button.danger { background: #533; border-color: #755; }
 button.danger:hover:not(:disabled) { background: #644; }
 
 #rows { flex: 1; overflow-y: auto; min-height: 0; }
-.dup-row { display: flex; border-bottom: 2px solid #333; min-height: 260px; }
+.dup-row { display: flex; border-bottom: 2px solid #333; min-height: 320px; }
+.dup-row.md5-dup { border-left: 4px solid #f55; background: #241a1a; }
+.md5-flag { color: #f55; font-weight: bold; }
 .neighbors { flex: none; width: 90px; display: flex; flex-direction: column; justify-content: center; gap: 4px; padding: 4px; }
 .neighbor { position: relative; cursor: default; }
 .neighbor img { width: 100%; max-height: 44px; object-fit: contain; display: block; background: #141414; }
