@@ -397,6 +397,12 @@ function identity(f) {
   return { path: f.rel_path, md5: effectiveMd5(f) };
 }
 
+function fileAbsPath(f) {
+  const tab = state.tabs.find((t) => t.name === state.currentTab);
+  if (!tab) return null;
+  return tab.library_root.replace(/\/+$/, "") + "/" + f.rel_path;
+}
+
 function fileImageLoc(f) {
   if (["present", "moved", "replaced"].includes(f.status))
     return { loc: "lib", path: f.rel_path, kind: null };
@@ -538,6 +544,19 @@ function renderRow(dg, f, dupMd5s) {
 
   const side = document.createElement("div");
   side.className = "dup-side";
+  side.title = "Click to copy absolute path";
+  side.onclick = async (ev) => {
+    if (ev.target.closest("button")) return;
+    const abs = fileAbsPath(f);
+    if (!abs) return;
+    try {
+      await navigator.clipboard.writeText(abs);
+    } catch (e) {
+      return;
+    }
+    side.classList.add("copied");
+    setTimeout(() => side.classList.remove("copied"), 400);
+  };
   const p = document.createElement("div");
   p.className = "path";
   p.textContent = f.rel_path;

@@ -65,7 +65,9 @@ button.danger:hover:not(:disabled) { background: #644; }
 .dup-viewport img { position: absolute; transform-origin: 0 0; user-select: none; -webkit-user-drag: none; }
 .dup-viewport .placeholder { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #666; font-size: 14px; }
 
-.dup-side { flex: none; width: 300px; padding: 8px; display: flex; flex-direction: column; gap: 6px; font-size: 12px; border-left: 1px solid #2a2a2a; }
+.dup-side { flex: none; width: 300px; padding: 8px; display: flex; flex-direction: column; gap: 6px; font-size: 12px; border-left: 1px solid #2a2a2a; cursor: copy; }
+.dup-side .actions { cursor: default; }
+.dup-side.copied { background: #253525; }
 .dup-side .path { word-break: break-all; color: #fff; }
 .dup-side .meta { color: #999; }
 .dup-side .status { font-weight: bold; }
