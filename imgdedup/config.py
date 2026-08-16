@@ -1,3 +1,4 @@
+import datetime
 import json
 import os
 from dataclasses import dataclass, field
@@ -21,6 +22,7 @@ class GroupConfig:
     min_file_size: int = 1024
     min_level: str = "Minimal"
     keep_no_gap: bool = False
+    hide_before: float = None
     scan_interval: float = 5.0
     czkawka_full_interval: float = 600.0
 
@@ -35,6 +37,12 @@ class AppConfig:
     state_dir: str = ""
     log_file: str = ""
     groups: list = field(default_factory=list)
+
+
+def parse_hide_before(value):
+    if value is None:
+        return None
+    return datetime.datetime.fromisoformat(value).timestamp()
 
 
 def load_config(path=DEFAULT_CONFIG_PATH):
@@ -56,6 +64,7 @@ def load_config(path=DEFAULT_CONFIG_PATH):
             min_file_size=g.get("min_file_size", 1024),
             min_level=g.get("min_level", "Minimal"),
             keep_no_gap=g.get("keep_no_gap", False),
+            hide_before=parse_hide_before(g.get("hide_before")),
             scan_interval=g.get("scan_interval", 5.0),
             czkawka_full_interval=g.get("czkawka_full_interval", 600.0),
         )

@@ -319,10 +319,17 @@ class GroupRuntime:
         except OSError:
             return []
 
+    def is_old(self, g):
+        if self.cfg.hide_before is None:
+            return False
+        mtimes = [self.file_index[rp][1] for rp in g["files"] if rp in self.file_index]
+        return bool(mtimes) and all(m < self.cfg.hide_before for m in mtimes)
+
     def list_snapshot(self):
         with self.lock:
             items = []
             ignored = []
+            old = []
             for gid in sorted(self.groups.keys()):
                 g = self.groups[gid]
                 group_md5s = self.group_md5_set(g) if self.ignored_sets else None
@@ -332,10 +339,16 @@ class GroupRuntime:
                     item["ignored_md5s"] = sorted(ignored_set)
                     ignored.append(item)
                     continue
+                if self.is_old(g):
+                    old.append(self._list_item(gid, g))
+                    continue
                 items.append(self._list_item(gid, g))
-            items.sort(key=lambda g: max(f["rel_path"] for f in g["files"]))
-            ignored.sort(key=lambda g: max(f["rel_path"] for f in g["files"]))
-            return {"version": self.version, "groups": items, "ignored": ignored}
+            key = lambda g: max(f["rel_path"] for f in g["files"])
+            items.sort(key=key)
+            ignored.sort(key=key)
+            old.sort(key=key)
+            return {"version": self.version, "groups": items,
+                    "ignored": ignored, "old": old}
 
     def _list_item(self, gid, g):
         files = []

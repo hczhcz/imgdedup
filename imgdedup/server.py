@@ -253,13 +253,27 @@ class Handler(BaseHTTPRequestHandler):
         with rt.lock:
             lib_match = (rel in rt.file_index
                          and rt.get_md5(rel, rt.file_index) == md5)
-        occupied = os.path.exists(lib)
+        lib_size = lib_mtime = None
+        try:
+            st = os.stat(lib)
+            lib_size, lib_mtime = st.st_size, st.st_mtime
+        except OSError:
+            pass
         matches = rt.repo_matches(repo_name, md5) if repo_name else []
+        repo_size = repo_mtime = None
+        if len(matches) == 1:
+            try:
+                st = os.stat(matches[0][1])
+                repo_size, repo_mtime = st.st_size, st.st_mtime
+            except OSError:
+                pass
         self.send_json({
             "in_library": lib_match,
-            "path_occupied": occupied,
+            "path_occupied": lib_size is not None,
             "in_repo": len(matches) == 1,
             "repo_kind": matches[0][0] if len(matches) == 1 else None,
+            "lib_size": lib_size, "lib_mtime": lib_mtime,
+            "repo_size": repo_size, "repo_mtime": repo_mtime,
         })
 
 

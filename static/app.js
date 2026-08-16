@@ -1,13 +1,15 @@
 const state = {
   tabs: [],
   currentTab: null,
-  listVersion: -1,
+  listJson: null,
   groups: [],
   ignored: [],
+  old: [],
   listMode: "main",
   currentGid: null,
   autoFollow: true,
   dupgroup: null,
+  dupJson: null,
   view: { z: 1, px: 0, py: 0 },
   carouselIdx: 0,
 };
@@ -103,7 +105,7 @@ function switchTab(name) {
   if (name === state.currentTab) return;
   if (!guardLeaveGroup()) return;
   state.currentTab = name;
-  state.listVersion = -1;
+  state.listJson = null;
   state.currentGid = null;
   state.autoFollow = true;
   state.dupgroup = loadStored("working", null);
@@ -123,11 +125,16 @@ async function pollState(force) {
     return;
   }
   if (data.error || !Array.isArray(data.groups)) return;
-  if (!force && data.version === state.listVersion) return;
-  state.listVersion = data.version;
-  state.groups = data.groups;
-  state.ignored = data.ignored || [];
-  renderGroupList();
+  const json = JSON.stringify([data.groups, data.ignored, data.old]);
+  const listChanged = json !== state.listJson;
+  if (listChanged) {
+    state.listJson = json;
+    state.groups = data.groups;
+    state.ignored = data.ignored || [];
+    state.old = data.old || [];
+    renderGroupList();
+  }
+  if (!force && !listChanged && state.currentGid === null) return;
   const newest = state.groups.length ? state.groups[state.groups.length - 1].id : null;
   if (state.currentGid === null && state.autoFollow && newest !== null) {
     selectGroup(newest, true);
@@ -144,7 +151,8 @@ function renderGroupList() {
   const stick = el.scrollTop + el.clientHeight >= el.scrollHeight - 10;
   el.innerHTML = "";
   const source = state.listMode === "completed" ? completedGroups() :
-    state.listMode === "ignored" ? state.ignored : state.groups;
+    state.listMode === "ignored" ? state.ignored :
+    state.listMode === "old" ? state.old : state.groups;
   for (const g of source) {
     const div = document.createElement("div");
     div.className = "group-item" + (g.id === state.currentGid ? " active" : "");
@@ -182,7 +190,7 @@ function renderGroupList() {
           group: state.currentTab,
           md5s: g.ignored_md5s,
         });
-        state.listVersion = -1;
+        state.listJson = null;
         pollState(true);
       };
       div.appendChild(b);
@@ -199,6 +207,7 @@ async function selectGroup(gid, fromAuto) {
   state.currentGid = gid;
   const working = loadStored("working", null);
   state.dupgroup = working && working.id === gid ? working : null;
+  state.dupJson = null;
   resetView();
   state.carouselIdx = 0;
   for (const el of $("grouplist").children) {
@@ -214,48 +223,66 @@ function selectStoredGroup(group) {
   if (!guardLeaveGroup()) return;
   state.currentGid = group.id;
   state.dupgroup = structuredClone(group);
+  state.dupJson = null;
   state.autoFollow = false;
   resetView();
-  refreshWorkingFiles().then(renderMain);
+  refreshWorkingFiles().then(() => {
+    state.dupJson = JSON.stringify(state.dupgroup);
+    renderMain();
+  });
 }
 
 async function loadDupgroup() {
   if (state.currentGid === null) return;
-  let data = null;
-  try {
-    if (!state.dupgroup) {
+  if (!state.dupgroup) {
+    let data = null;
+    try {
       data = await api("/api/dupgroup", { group: state.currentTab, id: state.currentGid });
-    } else {
-      await refreshWorkingFiles();
-      data = state.dupgroup;
+    } catch (e) {
+      return;
     }
-  } catch (e) {
-    return;
-  }
-  if (data.error) {
-    if (!state.dupgroup) {
+    if (data.error) {
       state.currentGid = null;
       state.autoFollow = true;
+      state.dupJson = null;
+      renderMain();
+      return;
     }
-  } else {
-    updateWorkingRules(data);
     state.dupgroup = data;
   }
-  renderMain();
+  await refreshWorkingFiles();
+  const json = JSON.stringify(state.dupgroup);
+  if (json !== state.dupJson) {
+    state.dupJson = json;
+    renderMain();
+  }
 }
 
 async function refreshWorkingFiles() {
   const dg = state.dupgroup;
   if (!dg) return;
   await Promise.all(dg.files.map(async (f) => {
-    const info = await api("/api/file-state", {
-      group: state.currentTab, path: f.rel_path, md5: f.md5,
-      repo_name: f.repo_path || "",
-    });
+    let info;
+    try {
+      info = await api("/api/file-state", {
+        group: state.currentTab, path: f.rel_path, md5: f.md5,
+        repo_name: f.repo_path || "",
+      });
+    } catch (e) {
+      return;
+    }
+    if (info.error) return;
     if (info.in_library) f.status = "present";
     else if (info.in_repo) f.status = info.path_occupied ? "replaced" : "in_repo";
-    else f.status = "missing";
+    else f.status = info.path_occupied ? "replaced" : "missing";
     if (info.repo_kind) f.repo_kind = info.repo_kind;
+    if (f.status === "in_repo") {
+      f.size = info.repo_size;
+      f.mtime = info.repo_mtime;
+    } else {
+      f.size = info.lib_size;
+      f.mtime = info.lib_mtime;
+    }
   }));
   updateWorkingRules(dg);
   saveWorking();
@@ -263,12 +290,12 @@ async function refreshWorkingFiles() {
 
 function updateWorkingRules(dg) {
   const present = dg.files.filter((f) => f.status === "present");
-  const missing = dg.files.filter((f) => f.status === "missing");
+  const slotFilled = (f) => ["present", "replaced"].includes(f.status);
   const gapsOk = !dg.keep_no_gap || dg.files.every((f) =>
-    f.status !== "in_repo" || f.is_last);
+    slotFilled(f) || f.is_last);
   dg.gaps_ok = gapsOk;
-  dg.can_complete = present.length === 1 && missing.length === 0 && gapsOk;
-  dg.can_ignore = present.length >= 2 && gapsOk;
+  dg.can_complete = present.length === 1 && gapsOk;
+  dg.can_ignore = present.length >= 2;
 }
 
 function fileKey(f) {
@@ -497,7 +524,7 @@ async function doAction(path, extra) {
     if (file) file.rel_path = extra.target;
   }
   await refreshWorkingFiles();
-  state.listVersion = -1;
+  state.listJson = null;
   await pollState(true);
 }
 
@@ -521,7 +548,7 @@ async function moveToRepo(file, name) {
   file.repo_kind = res.repo_kind;
   state.dupgroup.hasOperations = true;
   await refreshWorkingFiles();
-  state.listVersion = -1;
+  state.listJson = null;
   await pollState(true);
 }
 
@@ -610,7 +637,7 @@ $("btn-ignore").onclick = async () => {
   state.currentGid = null;
   state.dupgroup = null;
   state.autoFollow = true;
-  state.listVersion = -1;
+  state.listJson = null;
   await pollState(true);
 };
 
@@ -632,7 +659,7 @@ $("btn-complete").onclick = async () => {
     state.dupgroup = null;
     renderMain();
   }
-  state.listVersion = -1;
+  state.listJson = null;
   await pollState(true);
 };
 
