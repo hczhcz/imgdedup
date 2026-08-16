@@ -7,7 +7,7 @@ import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 from . import fileops, oplog
 
@@ -29,6 +29,7 @@ def make_thumbnail(abs_path):
             return _thumb_cache[key]
     try:
         img = Image.open(abs_path)
+        img = ImageOps.exif_transpose(img)
         img.thumbnail((THUMB_SIZE, THUMB_SIZE))
         img = img.convert("RGB")
         buf = io.BytesIO()
@@ -132,6 +133,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.api_image(qs, thumb=True)
             elif path == "/api/imageinfo":
                 self.api_imageinfo(qs)
+            elif path == "/api/file-state":
+                self.api_file_state(qs)
             else:
                 self.send_error_json("not_found", "not found", 404)
         except fileops.FileOpError as e:
@@ -151,27 +154,25 @@ class Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", "0"))
             body = json.loads(self.rfile.read(length) or b"{}")
             rt = self.get_runtime({"group": [body.get("group")]})
-            gid = int(body.get("id", 0))
             if path == "/api/move_to_repo":
-                rt.act_move_to_repo(gid, body["path"], body.get("repo_name"))
-                self.send_json({"ok": True})
+                kind = rt.act_move_to_repo(body["path"], body["md5"], body["repo_name"])
+                self.send_json({"ok": True, "repo_kind": kind})
             elif path == "/api/restore":
-                rt.act_restore(gid, body["path"])
+                rt.act_restore(body["path"], body["md5"], body["repo_name"])
                 self.send_json({"ok": True})
-            elif path == "/api/relocate":
-                rt.act_relocate(gid, body["path"], body["target"])
-                self.send_json({"ok": True})
-            elif path == "/api/complete":
-                rt.act_complete(gid)
+            elif path == "/api/move":
+                rt.act_move(body["path"], body["md5"], body["target"])
                 self.send_json({"ok": True})
             elif path == "/api/ignore":
-                rt.act_ignore(gid)
+                rt.act_ignore(body["md5s"])
                 self.send_json({"ok": True})
             elif path == "/api/unignore":
-                rt.act_unignore(gid)
+                rt.act_unignore(body["md5s"])
                 self.send_json({"ok": True})
             else:
                 self.send_error_json("not_found", "not found", 404)
+        except KeyError as e:
+            self.send_error_json("bad_request", f"missing field: {e}", 400)
         except fileops.FileOpError as e:
             self.send_error_json(e.code, e.message, 400, e.extra)
         except BrokenPipeError:
@@ -239,6 +240,26 @@ class Handler(BaseHTTPRequestHandler):
             "mtime": st.st_mtime,
             "width": dims[0] if dims else None,
             "height": dims[1] if dims else None,
+        })
+
+    def api_file_state(self, qs):
+        rt = self.get_runtime(qs)
+        rel = qs.get("path", [None])[0]
+        md5 = qs.get("md5", [None])[0]
+        repo_name = qs.get("repo_name", [None])[0]
+        if rel is None:
+            raise fileops.FileOpError("bad_request", "missing path")
+        lib = rt.abs_lib(rel)
+        with rt.lock:
+            lib_match = (rel in rt.file_index
+                         and rt.get_md5(rel, rt.file_index) == md5)
+        occupied = os.path.exists(lib)
+        matches = rt.repo_matches(repo_name, md5) if repo_name else []
+        self.send_json({
+            "in_library": lib_match,
+            "path_occupied": occupied,
+            "in_repo": len(matches) == 1,
+            "repo_kind": matches[0][0] if len(matches) == 1 else None,
         })
 
 

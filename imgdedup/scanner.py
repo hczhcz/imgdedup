@@ -9,6 +9,7 @@ from . import czkawka, fileops, oplog
 from .config import LEVELS
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif", ".avif", ".jxl", ".heic"}
+INCREMENTAL_LIMIT = 200
 
 
 def is_image(path):
@@ -30,16 +31,18 @@ class GroupRuntime:
         self.lock = threading.RLock()
         self.version = 0
         self.groups = {}
-        self.next_id = 1
         self.file_index = {}
         self.md5_cache = {}
+        self.repo_md5_cache = {}
         self.czkawka_groups = []
         self.tree_signature = None
         self.czkawka_seen = set()
         self.pending_new = set()
+        self.ignored_sets = set()
         self.state_path = os.path.join(app_cfg.state_dir, f"{group_cfg.name}.json")
         self.stop_event = threading.Event()
         self.czkawka_wakeup = threading.Event()
+        self.first_scan_done = threading.Event()
         self.load_state()
 
     def load_state(self):
@@ -48,11 +51,8 @@ class GroupRuntime:
         try:
             with open(self.state_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            self.next_id = data.get("next_id", 1)
-            self.groups = {}
-            for gid, g in data.get("groups", {}).items():
-                self.groups[int(gid)] = g
-            oplog.log("state_loaded", group=self.cfg.name, groups=len(self.groups))
+            self.ignored_sets = {frozenset(x) for x in data.get("ignored", []) if x}
+            oplog.log("state_loaded", group=self.cfg.name, ignored=len(self.ignored_sets))
         except Exception as e:
             oplog.error("state_load_failed", group=self.cfg.name, error=str(e))
 
@@ -60,7 +60,7 @@ class GroupRuntime:
         os.makedirs(os.path.dirname(self.state_path), exist_ok=True)
         tmp = self.state_path + ".tmp"
         with self.lock:
-            data = {"next_id": self.next_id, "groups": self.groups}
+            data = {"ignored": sorted(sorted(s) for s in self.ignored_sets)}
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=1)
             os.replace(tmp, self.state_path)
@@ -86,11 +86,6 @@ class GroupRuntime:
         if not (p == root or p.startswith(root.rstrip(os.sep) + os.sep)):
             raise fileops.FileOpError("bad_path", f"path escapes repo: {repo_name}")
         return p
-
-    def meta_repo_abs(self, meta):
-        if not meta.get("repo_path"):
-            return None
-        return self.abs_repo(meta["repo_path"], meta.get("repo_kind", "fuzzy"))
 
     def excluded(self, abs_path):
         for pat in self.cfg.exclude_patterns:
@@ -135,28 +130,30 @@ class GroupRuntime:
             self.md5_cache[key] = md5
         return md5
 
-    def compute_md5_groups(self, file_index):
-        by_size = {}
-        for rp, (size, mtime) in file_index.items():
-            by_size.setdefault(size, []).append(rp)
-        groups = []
-        for size, paths in by_size.items():
-            if len(paths) < 2:
-                continue
-            by_md5 = {}
-            for rp in paths:
-                md5 = self.get_md5(rp, file_index)
-                if md5 is not None:
-                    by_md5.setdefault(md5, []).append(rp)
-            for md5, group in by_md5.items():
-                if len(group) >= 2:
-                    groups.append(sorted(group))
+    def evict_md5_cache(self, file_index):
         stale = [k for k in self.md5_cache if k[0] not in file_index or file_index[k[0]] != (k[1], k[2])]
         for k in stale:
             del self.md5_cache[k]
-        return groups
 
-    def merge_groups(self, md5_groups, czkawka_groups, file_index):
+    def get_path_md5(self, path):
+        try:
+            st = os.stat(path)
+        except OSError:
+            return None
+        key = (path, st.st_size, st.st_mtime)
+        md5 = self.repo_md5_cache.get(key)
+        if md5 is None:
+            try:
+                md5 = file_md5(path)
+            except OSError:
+                return None
+            self.repo_md5_cache[key] = md5
+        stale = [k for k in self.repo_md5_cache if k[0] == path and k != key]
+        for old in stale:
+            del self.repo_md5_cache[old]
+        return md5
+
+    def merge_groups(self, czkawka_groups, file_index):
         parent = {}
 
         def find(x):
@@ -173,13 +170,7 @@ class GroupRuntime:
             if ra != rb:
                 parent[rb] = ra
 
-        exact_pairs = set()
         similarity_of = {}
-        for g in md5_groups:
-            for rp in g[1:]:
-                union(g[0], rp)
-                exact_pairs.add(rp)
-                exact_pairs.add(g[0])
         for g in czkawka_groups:
             base = g[0]["path"]
             if base not in file_index:
@@ -201,124 +192,54 @@ class GroupRuntime:
         for members in components.values():
             if len(members) < 2:
                 continue
-            if members & exact_pairs and len(members & exact_pairs) >= 2:
-                level = "Exact"
-            else:
-                sims = [similarity_of[m] for m in members if m in similarity_of]
-                best = min(sims) if sims else None
-                level = czkawka.classify_similarity(best, self.cfg.czkawka_hash_size) if best is not None else None
+            sims = [similarity_of[m] for m in members if m in similarity_of]
+            best = min(sims) if sims else None
+            level = czkawka.classify_similarity(best, self.cfg.czkawka_hash_size) if best is not None else None
             if level is None:
                 continue
-            if len(members & exact_pairs) < 2 and LEVELS.index(level) < self.cfg.min_level_index():
+            if LEVELS.index(level) < self.cfg.min_level_index():
                 continue
             scanned.append({"members": sorted(members), "level": level})
         return scanned
 
     def reconcile(self, scanned, file_index):
         with self.lock:
-            changed = False
-            member_to_gid = {}
-            for gid, g in self.groups.items():
-                for rp in g["files"]:
-                    member_to_gid.setdefault(rp, gid)
-
+            groups = {}
             for sg in scanned:
-                gids = sorted({member_to_gid[m] for m in sg["members"] if m in member_to_gid})
-                if not gids:
-                    gid = self.next_id
-                    self.next_id += 1
-                    self.groups[gid] = {
-                        "id": gid,
-                        "files": {m: {"repo_path": None} for m in sg["members"]},
-                        "level": sg["level"],
-                        "created_at": time.time(),
-                        "resolved": False,
-                    }
-                    for m in sg["members"]:
-                        member_to_gid[m] = gid
-                    changed = True
-                    oplog.log("dup_group_new", group=self.cfg.name, gid=gid,
-                              level=sg["level"], files=sg["members"])
-                else:
-                    gid = gids[0]
-                    g = self.groups[gid]
-                    for other in gids[1:]:
-                        og = self.groups.pop(other)
-                        for rp, meta in og["files"].items():
-                            if rp not in g["files"]:
-                                g["files"][rp] = meta
-                            elif meta.get("repo_path") and not g["files"][rp].get("repo_path"):
-                                g["files"][rp] = meta
-                            member_to_gid[rp] = gid
-                        if g.get("ignored") or og.get("ignored"):
-                            g["ignored"] = False
-                            oplog.log("dup_group_unignored", group=self.cfg.name, gid=gid)
-                        changed = True
-                        oplog.log("dup_group_merged", group=self.cfg.name, into=gid, merged=other)
-                    for m in sg["members"]:
-                        if m not in g["files"]:
-                            g["files"][m] = {"repo_path": None}
-                            member_to_gid[m] = gid
-                            changed = True
-                            if g.get("ignored"):
-                                g["ignored"] = False
-                                oplog.log("dup_group_unignored", group=self.cfg.name, gid=gid)
-                            oplog.log("dup_group_extended", group=self.cfg.name, gid=gid, file=m)
-                    if LEVELS.index(sg["level"]) > LEVELS.index(g["level"]):
-                        g["level"] = sg["level"]
-                        changed = True
-                    if g["resolved"]:
-                        present = [rp for rp in g["files"]
-                                   if rp in file_index and not g["files"][rp].get("repo_path")]
-                        if len(present) > 1:
-                            g["resolved"] = False
-                            changed = True
-
-            for gid, g in list(self.groups.items()):
-                present = [rp for rp in g["files"]
-                           if rp in file_index and not g["files"][rp].get("repo_path")]
-                in_repo = [rp for rp in g["files"] if g["files"][rp].get("repo_path")]
-                resolved = len(present) <= 1
-                if not in_repo and len(present) < 2:
-                    del self.groups[gid]
-                    changed = True
-                    oplog.log("dup_group_dropped", group=self.cfg.name, gid=gid)
-                elif resolved != g["resolved"]:
-                    g["resolved"] = resolved
-                    changed = True
-                    oplog.log("dup_group_resolved" if resolved else "dup_group_reopened",
-                              group=self.cfg.name, gid=gid)
+                members = sg["members"]
+                if len(members) < 2:
+                    continue
+                identity = "\0".join(members)
+                gid = int(hashlib.sha256(identity.encode()).hexdigest()[:13], 16)
+                old = self.groups.get(gid)
+                groups[gid] = {
+                    "id": gid,
+                    "files": members,
+                    "level": sg["level"],
+                    "created_at": old["created_at"] if old else time.time(),
+                }
+            before = {(gid, g["level"], tuple(g["files"])) for gid, g in self.groups.items()}
+            after = {(gid, g["level"], tuple(g["files"])) for gid, g in groups.items()}
+            changed = before != after
+            self.groups = groups
             if changed:
-                self.save_state()
                 self.bump()
             return changed
 
-    def refresh_statuses(self, file_index):
-        with self.lock:
-            changed = False
-            for g in self.groups.values():
-                for rp, meta in g["files"].items():
-                    status = self.file_status(rp, meta, file_index)
-                    if meta.get("_status") != status:
-                        meta["_status"] = status
-                        changed = True
-            if changed:
-                self.bump()
+    def group_md5_set(self, g):
+        md5s = set()
+        for rp in g["files"]:
+            md5 = self.get_md5(rp, self.file_index)
+            if md5 is None:
+                return None
+            md5s.add(md5)
+        return frozenset(md5s) if md5s else None
 
-    def file_status(self, rp, meta, file_index):
-        repo_path = meta.get("repo_path")
-        in_lib = rp in file_index
-        if repo_path:
-            repo_exists = os.path.isfile(self.meta_repo_abs(meta))
-            if in_lib:
-                return "replaced" if repo_exists else "restored_external"
-            return "in_repo" if repo_exists else "missing"
-        if in_lib:
-            return "present"
-        return "missing"
-
-    def sorted_files(self, g):
-        return sorted(g["files"].keys())
+    def is_ignored(self, g):
+        if not self.ignored_sets:
+            return False
+        s = self.group_md5_set(g)
+        return s is not None and s in self.ignored_sets
 
     def group_snapshot(self, gid):
         with self.lock:
@@ -326,29 +247,26 @@ class GroupRuntime:
             if not g:
                 return None
             files = []
-            order = self.sorted_files(g)
+            md5_counts = {}
+            order = sorted(g["files"])
             last = order[-1] if order else None
             dup_dirs = {}
             for other in self.groups.values():
-                if other.get("ignored"):
-                    continue
                 for rp in other["files"]:
                     dup_dirs.setdefault(os.path.dirname(rp), {})[os.path.basename(rp)] = other["id"]
             for rp in order:
-                meta = g["files"][rp]
-                status = meta.get("_status") or self.file_status(rp, meta, self.file_index)
                 info = {
                     "rel_path": rp,
-                    "repo_path": meta.get("repo_path"),
-                    "repo_kind": meta.get("repo_kind", "fuzzy"),
-                    "status": status,
+                    "md5": self.get_md5(rp, self.file_index),
+                    "status": "present" if rp in self.file_index else "missing",
                     "is_last": rp == last,
-                    "size": None, "mtime": None, "width": None, "height": None,
+                    "size": None, "mtime": None,
                     "neighbors_prev": [], "neighbors_next": [],
                 }
-                ap = self.abs_lib(rp) if status in ("present", "replaced", "restored_external") else (
-                    self.meta_repo_abs(meta) if meta.get("repo_path") and status == "in_repo" else None)
-                if ap and os.path.isfile(ap):
+                if info["md5"] is not None:
+                    md5_counts[info["md5"]] = md5_counts.get(info["md5"], 0) + 1
+                ap = self.abs_lib(rp)
+                if os.path.isfile(ap):
                     try:
                         st = os.stat(ap)
                         info["size"] = st.st_size
@@ -382,22 +300,12 @@ class GroupRuntime:
                         info["neighbors_next"].append(
                             {"rel_path": rp2, "dup_gid": dir_dups.get(s)})
                 files.append(info)
-            present = [f for f in files if f["status"] in ("present", "replaced", "restored_external")]
-            gaps_ok = True
-            if self.cfg.keep_no_gap:
-                for f in files:
-                    if f["status"] == "in_repo" and not f["is_last"]:
-                        gaps_ok = False
-            can_complete = len(present) == 1 and gaps_ok
+            level = "Exact" if any(n >= 2 for n in md5_counts.values()) else g["level"]
             return {
                 "id": gid,
-                "level": g["level"],
-                "resolved": g["resolved"],
-                "ignored": bool(g.get("ignored")),
-                "can_ignore": self.group_all_same_md5(g),
+                "level": level,
+                "ignored": self.is_ignored(g),
                 "keep_no_gap": self.cfg.keep_no_gap,
-                "can_complete": can_complete,
-                "gaps_ok": gaps_ok,
                 "files": files,
             }
 
@@ -414,107 +322,117 @@ class GroupRuntime:
     def list_snapshot(self):
         with self.lock:
             items = []
+            ignored = []
             for gid in sorted(self.groups.keys()):
                 g = self.groups[gid]
-                if g.get("ignored"):
+                group_md5s = self.group_md5_set(g) if self.ignored_sets else None
+                ignored_set = group_md5s if group_md5s in self.ignored_sets else None
+                if ignored_set is not None:
+                    item = self._list_item(gid, g)
+                    item["ignored_md5s"] = sorted(ignored_set)
+                    ignored.append(item)
                     continue
-                files = []
-                for rp in self.sorted_files(g):
-                    meta = g["files"][rp]
-                    size = None
-                    if rp in self.file_index:
-                        size = self.file_index[rp][0]
-                    elif meta.get("repo_path"):
-                        try:
-                            size = os.path.getsize(self.meta_repo_abs(meta))
-                        except OSError:
-                            pass
-                    files.append({
-                        "rel_path": rp,
-                        "name": os.path.basename(rp),
-                        "size": size,
-                        "status": meta.get("_status", "present"),
-                    })
-                items.append({
-                    "id": gid,
-                    "level": g["level"],
-                    "resolved": g["resolved"],
-                    "created_at": g["created_at"],
-                    "files": files,
-                })
-            return {"version": self.version, "groups": items}
+                items.append(self._list_item(gid, g))
+            items.sort(key=lambda g: max(f["rel_path"] for f in g["files"]))
+            ignored.sort(key=lambda g: max(f["rel_path"] for f in g["files"]))
+            return {"version": self.version, "groups": items, "ignored": ignored}
 
-    def _pick_repo_kind(self, g, rel_path):
-        my_md5 = self.get_md5(rel_path, self.file_index)
-        if my_md5 is None:
-            return "fuzzy"
-        for rp, meta in g["files"].items():
-            if rp == rel_path or meta.get("repo_path"):
-                continue
-            if self.get_md5(rp, self.file_index) == my_md5:
-                return "exact"
-        return "fuzzy"
+    def _list_item(self, gid, g):
+        files = []
+        for rp in sorted(g["files"]):
+            files.append({
+                "rel_path": rp,
+                "name": os.path.basename(rp),
+                "size": self.file_index[rp][0] if rp in self.file_index else None,
+                "status": "present" if rp in self.file_index else "missing",
+            })
+        return {
+            "id": gid,
+            "level": g["level"],
+            "created_at": g["created_at"],
+            "files": files,
+        }
 
-    def act_move_to_repo(self, gid, rel_path, repo_name=None):
+    def validate_library_file(self, rel_path, md5):
+        path = self.abs_lib(rel_path)
+        try:
+            if file_md5(path) != md5:
+                raise fileops.FileOpError("file_changed", "library file does not match path and md5")
+        except OSError:
+            raise fileops.FileOpError("file_changed", "library file does not match path and md5")
+        return path
+
+    def repo_matches(self, repo_name, md5):
+        matches = []
+        for kind in ("fuzzy", "exact"):
+            path = self.abs_repo(repo_name, kind)
+            if os.path.isfile(path) and self.get_path_md5(path) == md5:
+                matches.append((kind, path))
+        return matches
+
+    def fuzzy_has_md5(self, md5, size):
+        for dirpath, _, filenames in os.walk(self.cfg.dup_repo):
+            for name in filenames:
+                path = os.path.join(dirpath, name)
+                try:
+                    if os.path.getsize(path) != size:
+                        continue
+                except OSError:
+                    continue
+                if self.get_path_md5(path) == md5:
+                    return True
+        return False
+
+    def library_has_md5(self, md5, size, exclude=None):
         with self.lock:
-            g = self.groups.get(gid)
-            if not g or rel_path not in g["files"]:
-                raise fileops.FileOpError("not_found", "group or file not found")
-            meta = g["files"][rel_path]
-            if meta.get("repo_path"):
-                raise fileops.FileOpError("already_in_repo", "file already in repo")
+            candidates = [rp for rp, (sz, _) in self.file_index.items()
+                          if sz == size and rp != exclude]
+        for rp in candidates:
+            if self.get_md5(rp, self.file_index) == md5:
+                return True
+        return False
+
+    def act_move_to_repo(self, rel_path, md5, repo_name):
+        with self.lock:
             name = repo_name or os.path.basename(rel_path)
             if os.sep in name or name in ("", ".", ".."):
                 raise fileops.FileOpError("bad_name", f"invalid repo name: {name}")
-            kind = self._pick_repo_kind(g, rel_path)
-            src = self.abs_lib(rel_path)
+            src = self.validate_library_file(rel_path, md5)
+            size = os.path.getsize(src)
+            kind = "exact" if (self.library_has_md5(md5, size, rel_path)
+                               or self.fuzzy_has_md5(md5, size)) else "fuzzy"
             dst = self.abs_repo(name, kind)
             if os.path.exists(dst):
                 raise fileops.FileOpError("dst_exists", name, {"repo_kind": kind})
             fileops.safe_move(src, dst)
-            meta["repo_path"] = name
-            meta["repo_kind"] = kind
             self.file_index.pop(rel_path, None)
-            oplog.log("action_move_to_repo", group=self.cfg.name, gid=gid,
-                      file=rel_path, repo_name=name, repo_kind=kind)
+            oplog.log("action_move_to_repo", group=self.cfg.name, file=rel_path,
+                      md5=md5, repo_name=name, repo_kind=kind)
             self._after_action()
+            return kind
 
-    def act_restore(self, gid, rel_path):
+    def act_restore(self, rel_path, md5, repo_name):
         with self.lock:
-            g = self.groups.get(gid)
-            if not g or rel_path not in g["files"]:
-                raise fileops.FileOpError("not_found", "group or file not found")
-            meta = g["files"][rel_path]
-            name = meta.get("repo_path")
-            if not name:
-                raise fileops.FileOpError("not_in_repo", "file not in repo")
-            src = self.meta_repo_abs(meta)
+            matches = self.repo_matches(repo_name, md5)
+            if len(matches) != 1:
+                raise fileops.FileOpError("repo_file_ambiguous", "repository file not uniquely identified")
+            kind, src = matches[0]
             dst = self.abs_lib(rel_path)
             if os.path.exists(dst):
                 raise fileops.FileOpError("dst_exists", rel_path)
             fileops.safe_move(src, dst)
-            meta["repo_path"] = None
-            meta["repo_kind"] = None
             try:
                 st = os.stat(dst)
                 self.file_index[rel_path] = (st.st_size, st.st_mtime)
             except OSError:
                 pass
-            oplog.log("action_restore", group=self.cfg.name, gid=gid, file=rel_path)
+            oplog.log("action_restore", group=self.cfg.name, file=rel_path, md5=md5,
+                      repo_name=repo_name, repo_kind=kind)
             self._after_action()
 
-    def act_relocate(self, gid, rel_path, target_rel_path):
+    def act_move(self, rel_path, md5, target_rel_path):
         with self.lock:
-            g = self.groups.get(gid)
-            if not g or rel_path not in g["files"] or target_rel_path not in g["files"]:
-                raise fileops.FileOpError("not_found", "group or file not found")
-            meta = g["files"][rel_path]
-            target = g["files"][target_rel_path]
-            if meta.get("repo_path"):
-                raise fileops.FileOpError("in_repo", "source file is in repo")
-            if not target.get("repo_path"):
-                raise fileops.FileOpError("target_not_vacated", "target slot not vacated")
-            src = self.abs_lib(rel_path)
+            src = self.validate_library_file(rel_path, md5)
             dst = self.abs_lib(target_rel_path)
             if os.path.exists(dst):
                 raise fileops.FileOpError("dst_exists", target_rel_path)
@@ -525,63 +443,33 @@ class GroupRuntime:
                 self.file_index[target_rel_path] = (st.st_size, st.st_mtime)
             except OSError:
                 pass
-            oplog.log("action_relocate", group=self.cfg.name, gid=gid,
-                      src=rel_path, dst=target_rel_path)
+            oplog.log("action_move", group=self.cfg.name, src=rel_path, md5=md5,
+                      dst=target_rel_path)
             self._after_action()
 
-    def group_all_same_md5(self, g):
-        md5s = []
-        for rp, meta in g["files"].items():
-            if meta.get("repo_path"):
-                return False
-            md5 = self.get_md5(rp, self.file_index)
-            if md5 is None:
-                return False
-            md5s.append(md5)
-        return len(md5s) >= 2 and len(set(md5s)) == 1
-
-    def act_ignore(self, gid):
+    def act_ignore(self, md5s):
         with self.lock:
-            g = self.groups.get(gid)
-            if not g:
-                raise fileops.FileOpError("not_found", "group not found")
-            if not self.group_all_same_md5(g):
-                raise fileops.FileOpError(
-                    "not_all_exact",
-                    "group can only be ignored when all files have identical md5")
-            g["ignored"] = True
-            oplog.log("action_ignore", group=self.cfg.name, gid=gid,
-                      files=self.sorted_files(g))
+            s = frozenset(md5s)
+            if not s:
+                raise fileops.FileOpError("bad_request", "empty md5 set")
+            self.ignored_sets.add(s)
+            oplog.log("action_ignore", group=self.cfg.name, md5s=sorted(s))
             self.save_state()
             self.bump()
 
-    def act_unignore(self, gid):
+    def act_unignore(self, md5s):
         with self.lock:
-            g = self.groups.get(gid)
-            if not g:
-                raise fileops.FileOpError("not_found", "group not found")
-            g["ignored"] = False
-            oplog.log("action_unignore", group=self.cfg.name, gid=gid)
-            self.save_state()
-            self.bump()
-
-    def act_complete(self, gid):
-        with self.lock:
-            g = self.groups.get(gid)
-            if not g:
-                raise fileops.FileOpError("not_found", "group not found")
-            g["done"] = True
-            oplog.log("action_complete", group=self.cfg.name, gid=gid)
+            s = frozenset(md5s)
+            if s not in self.ignored_sets:
+                raise fileops.FileOpError("not_ignored", "group is not ignored")
+            self.ignored_sets.discard(s)
+            oplog.log("action_unignore", group=self.cfg.name, md5s=sorted(s))
             self.save_state()
             self.bump()
 
     def _after_action(self):
         self.tree_signature = None
-        self.refresh_statuses(self.file_index)
-        scanned = self.merge_groups(self.compute_md5_groups(dict(self.file_index)),
-                                    self.czkawka_groups, self.file_index)
-        self.reconcile(scanned, self.file_index)
-        self.save_state()
+        self._recompute(dict(self.file_index))
         self.bump()
 
     def _relativize(self, raw):
@@ -597,10 +485,11 @@ class GroupRuntime:
         return groups
 
     def _recompute(self, file_index):
-        md5_groups = self.compute_md5_groups(file_index)
-        scanned = self.merge_groups(md5_groups, self.czkawka_groups, file_index)
+        with self.lock:
+            czkawka_groups = list(self.czkawka_groups)
+        scanned = self.merge_groups(czkawka_groups, file_index)
         self.reconcile(scanned, file_index)
-        self.refresh_statuses(file_index)
+        self.evict_md5_cache(file_index)
 
     def scan_loop(self):
         while not self.stop_event.is_set():
@@ -608,20 +497,25 @@ class GroupRuntime:
                 file_index = self.walk_files()
                 sig = hash(tuple(sorted(file_index.items())))
                 tree_changed = sig != self.tree_signature
+                first = not self.first_scan_done.is_set()
                 with self.lock:
                     prev_keys = set(self.czkawka_seen)
                     self.file_index = file_index
+                    if first:
+                        self.czkawka_seen = {(rp, s, m) for rp, (s, m) in file_index.items()}
+                if first:
+                    self.first_scan_done.set()
+                    self.czkawka_wakeup.set()
                 if tree_changed:
                     self.tree_signature = sig
-                    new_keys = {(rp, size, mtime) for rp, (size, mtime) in file_index.items()
-                                if (rp, size, mtime) not in prev_keys}
-                    if new_keys:
-                        with self.lock:
-                            self.pending_new |= new_keys
-                        self.czkawka_wakeup.set()
+                    if not first:
+                        new_keys = {(rp, size, mtime) for rp, (size, mtime) in file_index.items()
+                                    if (rp, size, mtime) not in prev_keys}
+                        if new_keys:
+                            with self.lock:
+                                self.pending_new |= new_keys
+                            self.czkawka_wakeup.set()
                     self._recompute(file_index)
-                else:
-                    self.refresh_statuses(file_index)
             except Exception as e:
                 oplog.error("scan_loop_error", group=self.cfg.name, error=str(e))
             self.stop_event.wait(self.cfg.scan_interval)
@@ -637,12 +531,16 @@ class GroupRuntime:
         last_full = 0.0
         while not self.stop_event.is_set():
             self.czkawka_wakeup.clear()
+            if not self.first_scan_done.is_set():
+                self.czkawka_wakeup.wait(1.0)
+                continue
             try:
                 now = time.time()
                 with self.lock:
                     pending = set(self.pending_new)
                     file_index = dict(self.file_index)
-                run_full = now - last_full >= self.cfg.czkawka_full_interval
+                run_full = (now - last_full >= self.cfg.czkawka_full_interval
+                            or len(pending) > INCREMENTAL_LIMIT)
                 if run_full:
                     raw = czkawka.run_image_scan(self.app_cfg, self.cfg)
                     if raw is not None:

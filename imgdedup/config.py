@@ -61,7 +61,14 @@ def load_config(path=DEFAULT_CONFIG_PATH):
         )
         if gc.min_level not in LEVELS:
             raise ValueError(f"invalid min_level: {gc.min_level}")
+        if gc.czkawka_hash_size not in (8, 16, 32, 64):
+            raise ValueError(f"invalid czkawka_hash_size: {gc.czkawka_hash_size}")
+        if not os.path.isdir(gc.library_root):
+            raise ValueError(f"library_root not found: {gc.library_root}")
         groups.append(gc)
+    names = [g.name for g in groups]
+    if len(set(names)) != len(names):
+        raise ValueError("duplicate group names")
     state_dir = raw.get("state_dir") or os.path.join(base_dir, "state")
     log_file = raw.get("log_file") or os.path.join(base_dir, "imgdedup.log")
     return AppConfig(

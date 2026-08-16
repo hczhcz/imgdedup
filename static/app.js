@@ -3,13 +3,34 @@ const state = {
   currentTab: null,
   listVersion: -1,
   groups: [],
+  ignored: [],
+  listMode: "main",
   currentGid: null,
   autoFollow: true,
   dupgroup: null,
   view: { z: 1, px: 0, py: 0 },
   carouselIdx: 0,
-  knownGids: new Set(),
 };
+
+function storageKey(suffix) {
+  return `imgdedup:${state.currentTab}:${suffix}`;
+}
+
+function loadStored(suffix, fallback) {
+  try { return JSON.parse(localStorage.getItem(storageKey(suffix))) || fallback; }
+  catch (e) { return fallback; }
+}
+
+function saveWorking() {
+  if (state.dupgroup && state.dupgroup.hasOperations)
+    localStorage.setItem(storageKey("working"), JSON.stringify(state.dupgroup));
+  else
+    localStorage.removeItem(storageKey("working"));
+}
+
+function completedGroups() {
+  return loadStored("completed", []);
+}
 
 const $ = (id) => document.getElementById(id);
 
@@ -69,14 +90,13 @@ async function loadTabs() {
 
 function guardLeaveGroup() {
   const dg = state.dupgroup;
-  if (!dg || !dg.keep_no_gap) return true;
-  const present = dg.files.filter((f) =>
-    ["present", "replaced", "restored_external"].includes(f.status));
-  if (present.length === 1 && !dg.gaps_ok) {
+  if (!dg || !dg.hasOperations) return true;
+  const present = dg.files.filter((f) => f.status === "present");
+  if (dg.keep_no_gap && !dg.gaps_ok && present.length === 1)
     return window.confirm(
-      "This group has unfilled gaps (keep_no_gap is on). Leave anyway?");
-  }
-  return true;
+      "This group leaves a gap in the sequence. Leave anyway?");
+  alert("This group has unfinished operations. Complete or ignore it before leaving.");
+  return false;
 }
 
 function switchTab(name) {
@@ -86,8 +106,8 @@ function switchTab(name) {
   state.listVersion = -1;
   state.currentGid = null;
   state.autoFollow = true;
-  state.dupgroup = null;
-  state.knownGids = new Set();
+  state.dupgroup = loadStored("working", null);
+  if (state.dupgroup) state.currentGid = state.dupgroup.id;
   resetView();
   for (const el of $("tabs").children)
     el.classList.toggle("active", el.textContent === name);
@@ -102,20 +122,14 @@ async function pollState(force) {
   } catch (e) {
     return;
   }
+  if (data.error || !Array.isArray(data.groups)) return;
   if (!force && data.version === state.listVersion) return;
   state.listVersion = data.version;
   state.groups = data.groups;
+  state.ignored = data.ignored || [];
   renderGroupList();
-  const gids = state.groups.map((g) => g.id);
-  const unresolved = state.groups.filter((g) => !g.resolved);
-  const newest = unresolved.length ? unresolved[unresolved.length - 1].id : null;
-  const hasNew = gids.some((id) => !state.knownGids.has(id));
-  state.knownGids = new Set(gids);
-  if (state.currentGid !== null && !gids.includes(state.currentGid)) {
-    state.currentGid = null;
-    state.autoFollow = true;
-  }
-  if (state.autoFollow && newest !== null && (state.currentGid === null || hasNew)) {
+  const newest = state.groups.length ? state.groups[state.groups.length - 1].id : null;
+  if (state.currentGid === null && state.autoFollow && newest !== null) {
     selectGroup(newest, true);
   } else if (state.currentGid !== null) {
     await loadDupgroup();
@@ -129,10 +143,11 @@ function renderGroupList() {
   const el = $("grouplist");
   const stick = el.scrollTop + el.clientHeight >= el.scrollHeight - 10;
   el.innerHTML = "";
-  for (const g of state.groups) {
+  const source = state.listMode === "completed" ? completedGroups() :
+    state.listMode === "ignored" ? state.ignored : state.groups;
+  for (const g of source) {
     const div = document.createElement("div");
-    div.className = "group-item" + (g.id === state.currentGid ? " active" : "") +
-      (g.resolved ? " resolved" : "");
+    div.className = "group-item" + (g.id === state.currentGid ? " active" : "");
     const head = document.createElement("div");
     const lv = document.createElement("span");
     lv.className = "level level-" + g.level;
@@ -155,8 +170,23 @@ function renderGroupList() {
     }
     div.onclick = () => {
       state.autoFollow = false;
-      selectGroup(g.id, false);
+      if (state.listMode === "completed") selectStoredGroup(g);
+      else selectGroup(g.id, false);
     };
+    if (state.listMode === "ignored") {
+      const b = document.createElement("button");
+      b.textContent = "Unignore";
+      b.onclick = async (ev) => {
+        ev.stopPropagation();
+        await apiPost("/api/unignore", {
+          group: state.currentTab,
+          md5s: g.ignored_md5s,
+        });
+        state.listVersion = -1;
+        pollState(true);
+      };
+      div.appendChild(b);
+    }
     el.appendChild(div);
   }
   if (stick) el.scrollTop = el.scrollHeight;
@@ -167,6 +197,8 @@ async function selectGroup(gid, fromAuto) {
     if (!guardLeaveGroup()) return;
   }
   state.currentGid = gid;
+  const working = loadStored("working", null);
+  state.dupgroup = working && working.id === gid ? working : null;
   resetView();
   state.carouselIdx = 0;
   for (const el of $("grouplist").children) {
@@ -178,20 +210,73 @@ async function selectGroup(gid, fromAuto) {
   rows.scrollTop = rows.scrollHeight;
 }
 
+function selectStoredGroup(group) {
+  if (!guardLeaveGroup()) return;
+  state.currentGid = group.id;
+  state.dupgroup = structuredClone(group);
+  state.autoFollow = false;
+  resetView();
+  refreshWorkingFiles().then(renderMain);
+}
+
 async function loadDupgroup() {
   if (state.currentGid === null) return;
-  let data;
+  let data = null;
   try {
-    data = await api("/api/dupgroup", { group: state.currentTab, id: state.currentGid });
+    if (!state.dupgroup) {
+      data = await api("/api/dupgroup", { group: state.currentTab, id: state.currentGid });
+    } else {
+      await refreshWorkingFiles();
+      data = state.dupgroup;
+    }
   } catch (e) {
     return;
   }
   if (data.error) {
-    state.dupgroup = null;
+    if (!state.dupgroup) {
+      state.currentGid = null;
+      state.autoFollow = true;
+    }
   } else {
+    updateWorkingRules(data);
     state.dupgroup = data;
   }
   renderMain();
+}
+
+async function refreshWorkingFiles() {
+  const dg = state.dupgroup;
+  if (!dg) return;
+  await Promise.all(dg.files.map(async (f) => {
+    const info = await api("/api/file-state", {
+      group: state.currentTab, path: f.rel_path, md5: f.md5,
+      repo_name: f.repo_path || "",
+    });
+    if (info.in_library) f.status = "present";
+    else if (info.in_repo) f.status = info.path_occupied ? "replaced" : "in_repo";
+    else f.status = "missing";
+    if (info.repo_kind) f.repo_kind = info.repo_kind;
+  }));
+  updateWorkingRules(dg);
+  saveWorking();
+}
+
+function updateWorkingRules(dg) {
+  const present = dg.files.filter((f) => f.status === "present");
+  const missing = dg.files.filter((f) => f.status === "missing");
+  const gapsOk = !dg.keep_no_gap || dg.files.every((f) =>
+    f.status !== "in_repo" || f.is_last);
+  dg.gaps_ok = gapsOk;
+  dg.can_complete = present.length === 1 && missing.length === 0 && gapsOk;
+  dg.can_ignore = present.length >= 2 && gapsOk;
+}
+
+function fileKey(f) {
+  return `${f.rel_path}\0${f.md5 || ""}`;
+}
+
+function identity(f) {
+  return { path: f.rel_path, md5: f.md5 };
 }
 
 function fileImageLoc(f) {
@@ -353,21 +438,22 @@ function renderRow(dg, f) {
 
   const actions = document.createElement("div");
   actions.className = "actions";
-  const canMove = ["present", "replaced", "restored_external"].includes(f.status);
-  if (canMove && !f.repo_path) {
+  if (f.status === "present") {
     const b = document.createElement("button");
     b.className = "danger";
     b.textContent = "Move to repo";
-    b.onclick = () => moveToRepo(dg.id, f.rel_path, null);
+    b.onclick = () => moveToRepo(f, null);
     actions.appendChild(b);
   }
   if (f.status === "in_repo") {
     const b = document.createElement("button");
     b.textContent = "Restore";
-    b.onclick = () => doAction("/api/restore", { path: f.rel_path });
+    b.onclick = () => doAction("/api/restore", {
+      ...identity(f), repo_name: f.repo_path,
+    });
     actions.appendChild(b);
   }
-  if (canMove && !f.repo_path) {
+  if (f.status === "present") {
     const idx = dg.files.indexOf(f);
     const prevSlot = dg.files.slice(0, idx).reverse().find((x) => x.status === "in_repo");
     const nextSlot = dg.files.slice(idx + 1).find((x) => x.status === "in_repo");
@@ -375,14 +461,18 @@ function renderRow(dg, f) {
       const b = document.createElement("button");
       b.textContent = "Move to prev slot";
       b.title = prevSlot.rel_path;
-      b.onclick = () => doAction("/api/relocate", { path: f.rel_path, target: prevSlot.rel_path });
+      b.onclick = () => doAction("/api/move", {
+        ...identity(f), target: prevSlot.rel_path,
+      });
       actions.appendChild(b);
     }
     if (nextSlot) {
       const b = document.createElement("button");
       b.textContent = "Move to next slot";
       b.title = nextSlot.rel_path;
-      b.onclick = () => doAction("/api/relocate", { path: f.rel_path, target: nextSlot.rel_path });
+      b.onclick = () => doAction("/api/move", {
+        ...identity(f), target: nextSlot.rel_path,
+      });
       actions.appendChild(b);
     }
   }
@@ -392,24 +482,45 @@ function renderRow(dg, f) {
 }
 
 async function doAction(path, extra) {
-  const body = { group: state.currentTab, id: state.currentGid, ...extra };
+  const body = { group: state.currentTab, ...extra };
   const res = await apiPost(path, body);
-  if (res.error) alert(`${res.error}: ${res.message}`);
+  if (res.error) {
+    alert(`${res.error}: ${res.message}`);
+    return;
+  }
+  state.dupgroup.hasOperations = true;
+  if (path === "/api/restore") {
+    const file = state.dupgroup.files.find((f) => fileKey(f) === `${extra.path}\0${extra.md5}`);
+    if (file) file.repo_path = null;
+  } else if (path === "/api/move") {
+    const file = state.dupgroup.files.find((f) => fileKey(f) === `${extra.path}\0${extra.md5}`);
+    if (file) file.rel_path = extra.target;
+  }
+  await refreshWorkingFiles();
   state.listVersion = -1;
   await pollState(true);
 }
 
-async function moveToRepo(gid, relPath, name) {
-  const body = { group: state.currentTab, id: gid, path: relPath };
-  if (name) body.repo_name = name;
+async function moveToRepo(file, name) {
+  const body = {
+    group: state.currentTab, ...identity(file),
+    repo_name: name || file.rel_path.split("/").pop(),
+  };
   const res = await apiPost("/api/move_to_repo", body);
   if (res.error === "dst_exists") {
-    const conflict = name || relPath.split("/").pop();
+    const conflict = name || file.rel_path.split("/").pop();
     showRenameModal(conflict, res.repo_kind || "fuzzy",
-      (newName) => moveToRepo(gid, relPath, newName));
+      (newName) => moveToRepo(file, newName));
     return;
   }
-  if (res.error) alert(`${res.error}: ${res.message}`);
+  if (res.error) {
+    alert(`${res.error}: ${res.message}`);
+    return;
+  }
+  file.repo_path = body.repo_name;
+  file.repo_kind = res.repo_kind;
+  state.dupgroup.hasOperations = true;
+  await refreshWorkingFiles();
   state.listVersion = -1;
   await pollState(true);
 }
@@ -464,7 +575,7 @@ function renderCarousel() {
   if (img.dataset.src !== url) {
     img.dataset.src = url;
     img.src = url;
-    img.onload = () => applyCarouselView();
+    img.onload = applyCarouselView;
   } else {
     applyCarouselView();
   }
@@ -476,25 +587,26 @@ function applyCarouselView() {
   const vp = $("carousel");
   if (!img.naturalWidth) return;
   const vw = vp.clientWidth, vh = vp.clientHeight;
-  const s0 = Math.min(vw / img.naturalWidth, vh / img.naturalHeight);
-  const mainVp = document.querySelector(".dup-viewport");
-  let ratio = 1;
-  if (mainVp) ratio = Math.min(vw / mainVp.clientWidth, vh / mainVp.clientHeight);
-  const s = s0 * state.view.z;
+  const s = Math.min(vw / img.naturalWidth, vh / img.naturalHeight);
   const cx = (vw - img.naturalWidth * s) / 2;
   const cy = (vh - img.naturalHeight * s) / 2;
-  img.style.transform =
-    `translate(${cx + state.view.px * ratio}px, ${cy + state.view.py * ratio}px) scale(${s})`;
+  img.style.transform = `translate(${cx}px, ${cy}px) scale(${s})`;
 }
 
 $("btn-ignore").onclick = async () => {
   const dg = state.dupgroup;
-  if (!dg) return;
+  if (!dg || !dg.can_ignore) return;
   if (!window.confirm(
-    "Ignore this group? It will be hidden from the list. (All files have identical md5.)"))
+    "Ignore this group? It will be hidden until a new member appears."))
     return;
-  const res = await apiPost("/api/ignore", { group: state.currentTab, id: dg.id });
-  if (res.error) alert(`${res.error}: ${res.message}`);
+  const md5s = [...new Set(dg.files.filter((f) => f.status === "present" && f.md5).map((f) => f.md5))];
+  if (!md5s.length) return;
+  const res = await apiPost("/api/ignore", { group: state.currentTab, md5s });
+  if (res.error) {
+    alert(`${res.error}: ${res.message}`);
+    return;
+  }
+  localStorage.removeItem(storageKey("working"));
   state.currentGid = null;
   state.dupgroup = null;
   state.autoFollow = true;
@@ -504,10 +616,14 @@ $("btn-ignore").onclick = async () => {
 
 $("btn-complete").onclick = async () => {
   const dg = state.dupgroup;
-  if (!dg) return;
-  await apiPost("/api/complete", { group: state.currentTab, id: dg.id });
+  if (!dg || !dg.can_complete) return;
+  const completed = completedGroups().filter((g) => g.id !== dg.id);
+  completed.push({ ...structuredClone(dg), hasOperations: false });
+  localStorage.setItem(storageKey("completed"), JSON.stringify(completed.slice(-50)));
+  localStorage.removeItem(storageKey("working"));
   const idx = state.groups.findIndex((g) => g.id === dg.id);
-  const prev = state.groups.slice(0, idx).reverse().find((g) => !g.resolved);
+  const prev = state.groups.slice(0, idx < 0 ? state.groups.length : idx)
+    .reverse().find((g) => g.id !== dg.id);
   state.autoFollow = false;
   if (prev) {
     await selectGroup(prev.id, true);
@@ -529,10 +645,14 @@ setInterval(() => {
 
 setInterval(() => pollState(false), 1000);
 
-const origApplyViewAll = applyViewAll;
-applyViewAll = function () {
-  origApplyViewAll();
-  applyCarouselView();
-};
-
 loadTabs();
+
+for (const button of $("list-tabs").querySelectorAll("button")) {
+  button.onclick = () => {
+    if (!guardLeaveGroup()) return;
+    state.listMode = button.dataset.mode;
+    for (const b of $("list-tabs").querySelectorAll("button"))
+      b.classList.toggle("active", b === button);
+    renderGroupList();
+  };
+}

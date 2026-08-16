@@ -10,6 +10,9 @@ body { display: flex; flex-direction: column; overflow: hidden; }
 #layout { display: flex; flex: 1; min-height: 0; }
 
 #sidebar { width: 320px; flex: none; display: flex; flex-direction: column; border-right: 1px solid #333; min-height: 0; }
+#list-tabs { display: flex; flex: none; border-bottom: 1px solid #333; }
+#list-tabs button { flex: 1; border: 0; border-radius: 0; padding: 7px 2px; }
+#list-tabs button.active { background: #2a2a4a; color: #fff; }
 #grouplist { flex: 1; overflow-y: auto; min-height: 0; }
 .group-item { padding: 6px 8px; border-bottom: 1px solid #2a2a2a; cursor: pointer; font-size: 12px; }
 .group-item:hover { background: #2a2a2a; }

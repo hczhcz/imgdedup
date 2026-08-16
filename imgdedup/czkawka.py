@@ -2,7 +2,6 @@ import json
 import os
 import shutil
 import subprocess
-import tempfile
 
 from . import oplog
 
@@ -22,6 +21,35 @@ def classify_similarity(similarity, hash_size):
         if similarity <= t:
             return level
     return None
+
+
+def _safe_name(name):
+    out = name.replace(os.sep, "_")
+    if os.altsep:
+        out = out.replace(os.altsep, "_")
+    return out
+
+
+def _work_dir(cfg, group):
+    d = os.path.join(cfg.state_dir, "czkawka", _safe_name(group.name))
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _full_out(cfg, group):
+    return os.path.join(_work_dir(cfg, group), "full.json")
+
+
+def _warm_dir(cfg, group):
+    return os.path.join(_work_dir(cfg, group), "warm")
+
+
+def _warm_out(cfg, group):
+    return os.path.join(_work_dir(cfg, group), "warm.json")
+
+
+def _inner_out(cfg, group):
+    return os.path.join(_work_dir(cfg, group), "inner.json")
 
 
 def _base_cmd(cfg, group, out_path):
@@ -46,21 +74,26 @@ def _base_cmd(cfg, group, out_path):
 
 def _run(cfg, group, cmd, out_path, label):
     try:
+        os.remove(out_path)
+    except OSError:
+        pass
+    try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
-        if proc.returncode != 0:
-            oplog.error("czkawka_failed", group=group.name, mode=label,
-                        code=proc.returncode, stderr=proc.stderr[-2000:])
-            return None
-        with open(out_path, "r", encoding="utf-8") as f:
-            return json.load(f)
     except Exception as e:
         oplog.error("czkawka_error", group=group.name, mode=label, error=str(e))
         return None
-    finally:
-        try:
-            os.remove(out_path)
-        except OSError:
-            pass
+    if proc.returncode != 0:
+        oplog.error("czkawka_failed", group=group.name, mode=label,
+                    code=proc.returncode, stderr=proc.stderr[-2000:])
+        return None
+    try:
+        with open(out_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return []
+    except Exception as e:
+        oplog.error("czkawka_error", group=group.name, mode=label, error=str(e))
+        return None
 
 
 def _item(raw):
@@ -74,8 +107,7 @@ def _item(raw):
 
 
 def run_image_scan(cfg, group):
-    fd, out_path = tempfile.mkstemp(suffix=".json", prefix="imgdedup-czkawka-")
-    os.close(fd)
+    out_path = _full_out(cfg, group)
     cmd = _base_cmd(cfg, group, out_path)
     cmd += ["-d", group.library_root]
     raw = _run(cfg, group, cmd, out_path, "full")
@@ -90,60 +122,54 @@ def run_image_scan(cfg, group):
 
 
 def run_incremental_scan(cfg, group, new_abs_paths):
-    warm_dir = tempfile.mkdtemp(prefix="imgdedup-warm-")
+    warm_dir = _warm_dir(cfg, group)
+    shutil.rmtree(warm_dir, ignore_errors=True)
+    os.makedirs(warm_dir)
     mapping = {}
-    try:
-        for i, ap in enumerate(new_abs_paths):
-            ext = os.path.splitext(ap)[1]
-            warm_name = f"{i:06d}{ext}"
-            warm_path = os.path.join(warm_dir, warm_name)
-            try:
-                shutil.copy2(ap, warm_path)
-                mapping[warm_path] = ap
-            except OSError:
+    for i, ap in enumerate(new_abs_paths):
+        ext = os.path.splitext(ap)[1]
+        warm_path = os.path.join(warm_dir, f"{i:06d}{ext}")
+        try:
+            shutil.copy2(ap, warm_path)
+            mapping[warm_path] = ap
+        except OSError:
+            continue
+    if not mapping:
+        return []
+    out_path = _warm_out(cfg, group)
+    cmd = _base_cmd(cfg, group, out_path)
+    cmd += ["-d", warm_dir, "-r", group.library_root]
+    raw = _run(cfg, group, cmd, out_path, "incremental")
+    if raw is None:
+        return None
+    result = []
+    for g in raw:
+        ref, others = g[0], g[1]
+        files = [_item(ref)]
+        for item in others:
+            real = mapping.get(item["path"])
+            if real is None or real == ref["path"]:
                 continue
-        if not mapping:
-            return []
-        result = []
-        fd, out_path = tempfile.mkstemp(suffix=".json", prefix="imgdedup-czkawka-")
-        os.close(fd)
-        cmd = _base_cmd(cfg, group, out_path)
-        cmd += ["-d", warm_dir, "-r", group.library_root]
-        for ap in mapping.values():
-            cmd += ["-E", "*" + ap]
-        raw = _run(cfg, group, cmd, out_path, "incremental")
-        if raw is None:
-            return None
-        for g in raw:
-            ref, others = g[0], g[1]
-            files = [_item(ref)]
-            for item in others:
-                real = mapping.get(item["path"])
-                if real is None or real == ref["path"]:
-                    continue
-                it = _item(item)
-                it["path"] = real
-                files.append(it)
-            if len(files) >= 2:
-                result.append(files)
-        if len(mapping) >= 2:
-            fd, out_path = tempfile.mkstemp(suffix=".json", prefix="imgdedup-czkawka-")
-            os.close(fd)
-            cmd = _base_cmd(cfg, group, out_path)
-            cmd += ["-d", warm_dir]
-            raw = _run(cfg, group, cmd, out_path, "incremental-inner")
-            if raw is not None:
-                for g in raw:
-                    files = []
-                    for item in g:
-                        real = mapping.get(item["path"])
-                        if real is None:
-                            continue
-                        it = _item(item)
-                        it["path"] = real
-                        files.append(it)
-                    if len(files) >= 2:
-                        result.append(files)
-        return result
-    finally:
-        shutil.rmtree(warm_dir, ignore_errors=True)
+            it = _item(item)
+            it["path"] = real
+            files.append(it)
+        if len(files) >= 2:
+            result.append(files)
+    if len(mapping) >= 2:
+        inner_out = _inner_out(cfg, group)
+        cmd = _base_cmd(cfg, group, inner_out)
+        cmd += ["-d", warm_dir]
+        raw = _run(cfg, group, cmd, inner_out, "incremental-inner")
+        if raw is not None:
+            for g in raw:
+                files = []
+                for item in g:
+                    real = mapping.get(item["path"])
+                    if real is None:
+                        continue
+                    it = _item(item)
+                    it["path"] = real
+                    files.append(it)
+                if len(files) >= 2:
+                    result.append(files)
+    return result
