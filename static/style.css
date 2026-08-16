@@ -72,7 +72,7 @@ button.danger:hover:not(:disabled) { background: #644; }
 .status-in_repo { color: #888; }
 .status-missing { color: #f66; }
 .status-replaced { color: #6cf; }
-.status-restored_external { color: #fc6; }
+.status-moved { color: #6cf; }
 .dup-side .meta.max-val { color: #fc6; font-weight: bold; }
 .dup-side .actions { display: flex; flex-direction: column; gap: 4px; margin-top: auto; }
 .dup-side .slot-row { display: flex; gap: 4px; }

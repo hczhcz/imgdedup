@@ -131,7 +131,7 @@ const showConfirm = async (text) =>
 async function guardLeaveGroup() {
   const dg = state.dupgroup;
   if (!dg || !dg.hasOperations) return true;
-  const present = dg.files.filter((f) => f.status === "present");
+  const present = dg.files.filter(isPresentLike);
   if (dg.keep_no_gap && !dg.gaps_ok && present.length === 1)
     return showConfirm(
       "This group leaves a gap in the sequence. Leave anyway?");
@@ -325,10 +325,37 @@ async function refreshWorkingFiles() {
       return;
     }
     if (info.error) return;
-    if (info.in_library) f.status = "present";
-    else if (info.in_repo) f.status = info.path_occupied ? "replaced" : "in_repo";
-    else f.status = info.path_occupied ? "replaced" : "missing";
     if (info.repo_kind) f.repo_kind = info.repo_kind;
+    if (info.in_library) {
+      f.moved_from = null;
+      f.moved_md5 = null;
+      f.status = "present";
+      f.size = info.lib_size;
+      f.mtime = info.lib_mtime;
+      return;
+    }
+    if (f.moved_md5 && f.moved_md5 !== f.md5) {
+      let mi;
+      try {
+        mi = await api("/api/file-state", {
+          group: state.currentTab, path: f.rel_path, md5: f.moved_md5,
+          repo_name: "",
+        });
+      } catch (e) {
+        return;
+      }
+      if (mi.error) return;
+      if (mi.in_library) {
+        f.status = "moved";
+        f.size = mi.lib_size;
+        f.mtime = mi.lib_mtime;
+        return;
+      }
+      f.moved_md5 = null;
+      f.moved_from = null;
+    }
+    if (info.in_repo) f.status = info.path_occupied ? "replaced" : "in_repo";
+    else f.status = info.path_occupied ? "replaced" : "missing";
     if (f.status === "in_repo") {
       f.size = info.repo_size;
       f.mtime = info.repo_mtime;
@@ -341,9 +368,13 @@ async function refreshWorkingFiles() {
   saveWorking();
 }
 
+function isPresentLike(f) {
+  return f.status === "present" || f.status === "moved";
+}
+
 function updateWorkingRules(dg) {
-  const present = dg.files.filter((f) => f.status === "present");
-  const slotFilled = (f) => ["present", "replaced"].includes(f.status);
+  const present = dg.files.filter(isPresentLike);
+  const slotFilled = (f) => ["present", "replaced", "moved"].includes(f.status);
   const gapsOk = !dg.keep_no_gap || dg.files.every((f) =>
     slotFilled(f) || f.is_last);
   dg.gaps_ok = gapsOk;
@@ -355,12 +386,16 @@ function fileKey(f) {
   return `${f.rel_path}\0${f.md5 || ""}`;
 }
 
+function effectiveMd5(f) {
+  return f.status === "moved" ? f.moved_md5 : f.md5;
+}
+
 function identity(f) {
-  return { path: f.rel_path, md5: f.md5 };
+  return { path: f.rel_path, md5: effectiveMd5(f) };
 }
 
 function fileImageLoc(f) {
-  if (["present", "replaced", "restored_external"].includes(f.status))
+  if (["present", "moved", "replaced"].includes(f.status))
     return { loc: "lib", path: f.rel_path, kind: null };
   if (f.status === "in_repo")
     return { loc: "repo", path: f.repo_path, kind: f.repo_kind };
@@ -437,8 +472,10 @@ function renderMain() {
   rows.innerHTML = "";
   if (!dg) { renderCarousel(); return; }
   const md5Counts = {};
-  for (const f of dg.files)
-    if (f.md5) md5Counts[f.md5] = (md5Counts[f.md5] || 0) + 1;
+  for (const f of dg.files) {
+    const m = effectiveMd5(f);
+    if (m) md5Counts[m] = (md5Counts[m] || 0) + 1;
+  }
   const dupMd5s = new Set(Object.keys(md5Counts).filter((m) => md5Counts[m] >= 2));
   for (const f of dg.files) rows.appendChild(renderRow(dg, f, dupMd5s));
   if (stick) rows.scrollTop = rows.scrollHeight;
@@ -473,7 +510,7 @@ function renderNeighborCol(neighbors) {
 
 function renderRow(dg, f, dupMd5s) {
   const row = document.createElement("div");
-  row.className = "dup-row" + (f.md5 && dupMd5s.has(f.md5) ? " md5-dup" : "");
+  row.className = "dup-row" + (effectiveMd5(f) && dupMd5s.has(effectiveMd5(f)) ? " md5-dup" : "");
   row.appendChild(renderNeighborCol(f.neighbors_prev));
 
   const vp = document.createElement("div");
@@ -503,9 +540,10 @@ function renderRow(dg, f, dupMd5s) {
   side.appendChild(p);
   const st = document.createElement("div");
   st.className = "status status-" + f.status;
-  st.textContent = f.status + (f.repo_path ? ` (dup repo: ${f.repo_path})` : "");
+  st.textContent = f.status === "moved" ? `moved here (from: ${f.moved_from})` :
+    f.status + (f.repo_path ? ` (dup repo: ${f.repo_path})` : "");
   side.appendChild(st);
-  if (f.md5 && dupMd5s.has(f.md5)) {
+  if (effectiveMd5(f) && dupMd5s.has(effectiveMd5(f))) {
     const em = document.createElement("div");
     em.className = "md5-flag";
     em.textContent = "exact duplicate (same md5)";
@@ -547,7 +585,7 @@ function renderRow(dg, f, dupMd5s) {
 
   const actions = document.createElement("div");
   actions.className = "actions";
-  const present = f.status === "present";
+  const present = isPresentLike(f);
   const inRepo = f.status === "in_repo";
   const idx = dg.files.indexOf(f);
   const prevSlot = dg.files.slice(0, idx).reverse().find((x) => x.status === "in_repo");
@@ -562,7 +600,7 @@ function renderRow(dg, f, dupMd5s) {
   } else {
     bMain.className = "danger";
     bMain.textContent = "Move to dup repo";
-    bMain.disabled = !present;
+    bMain.disabled = f.status !== "present";
     bMain.onclick = () => moveToRepo(f, null);
   }
   actions.appendChild(bMain);
@@ -608,8 +646,11 @@ async function doAction(path, extra) {
     const file = state.dupgroup.files.find((f) => fileKey(f) === `${extra.path}\0${extra.md5}`);
     if (file) file.repo_path = null;
   } else if (path === "/api/move") {
-    const file = state.dupgroup.files.find((f) => fileKey(f) === `${extra.path}\0${extra.md5}`);
-    if (file) file.rel_path = extra.target;
+    const target = state.dupgroup.files.find((x) => x.rel_path === extra.target);
+    if (target) {
+      target.moved_from = extra.path;
+      target.moved_md5 = extra.md5;
+    }
   }
   await refreshWorkingFiles();
   state.listJson = null;
@@ -676,21 +717,17 @@ function renderCarousel() {
   const url = imgUrl(src.loc, src.path, f.mtime || "", src.kind);
   label.textContent = f.rel_path;
   const ready = imgs.find((i) => i.dataset.src === url);
-  if (ready) {
-    if (ready.complete && ready.naturalWidth) {
-      applyCarouselView(ready);
-      carouselShow(ready);
-    }
-    return;
+  const target = ready ||
+    imgs.find((i) => !i.classList.contains("front")) || imgs[0];
+  if (!ready) {
+    target.dataset.src = url;
+    target.src = url;
   }
-  const back = imgs.find((i) => !i.classList.contains("front")) || imgs[0];
-  back.dataset.src = url;
-  back.onload = () => {
-    if (back.dataset.src !== url) return;
-    applyCarouselView(back);
-    carouselShow(back);
-  };
-  back.src = url;
+  target.decode().then(() => {
+    if (target.dataset.src !== url) return;
+    applyCarouselView(target);
+    carouselShow(target);
+  }).catch(() => {});
 }
 
 function applyCarouselView(img) {
@@ -712,7 +749,7 @@ $("btn-ignore").onclick = async () => {
   if (!(await showConfirm(
     "Ignore this group? It will be hidden until its members change.")))
     return;
-  const md5s = [...new Set(dg.files.filter((f) => f.status === "present" && f.md5).map((f) => f.md5))];
+  const md5s = [...new Set(dg.files.filter((f) => isPresentLike(f) && effectiveMd5(f)).map(effectiveMd5))];
   if (!md5s.length) return;
   const res = await apiPost("/api/ignore", { group: state.currentTab, md5s });
   if (res.error) {
