@@ -128,15 +128,23 @@ const showAlert = (text) => showDialog({ text });
 const showConfirm = async (text) =>
   (await showDialog({ text, cancel: true })) === true;
 
+function stashToCompleted(dg, hasOps) {
+  const completed = completedGroups().filter((g) => g.id !== dg.id);
+  completed.push({ ...structuredClone(dg), hasOperations: hasOps });
+  localStorage.setItem(storageKey("completed"), JSON.stringify(completed.slice(-50)));
+  localStorage.removeItem(storageKey("working"));
+}
+
 async function guardLeaveGroup() {
   const dg = state.dupgroup;
   if (!dg || !dg.hasOperations) return true;
   const present = dg.files.filter(isPresentLike);
-  if (dg.keep_no_gap && !dg.gaps_ok && present.length === 1)
-    return showConfirm(
-      "This group leaves a gap in the sequence. Leave anyway?");
-  await showAlert("This group has unfinished operations. Complete or ignore it before leaving.");
-  return false;
+  const text = dg.keep_no_gap && !dg.gaps_ok && present.length === 1
+    ? "This group leaves a gap in the sequence. Move it to Completed and leave?"
+    : "This group has unfinished operations. Move it to Completed and leave?";
+  if (!(await showConfirm(text))) return false;
+  stashToCompleted(dg, true);
+  return true;
 }
 
 async function switchTab(name) {
@@ -215,6 +223,12 @@ function renderGroupList() {
     lv.textContent = g.level;
     head.appendChild(lv);
     head.appendChild(document.createTextNode("#" + g.id));
+    if (state.listMode === "completed" && g.hasOperations) {
+      const tag = document.createElement("span");
+      tag.className = "unfinished-tag";
+      tag.textContent = "unfinished";
+      head.appendChild(tag);
+    }
     div.appendChild(head);
     for (const f of g.files) {
       const row = document.createElement("div");
@@ -234,23 +248,15 @@ function renderGroupList() {
       if (state.listMode === "completed") selectStoredGroup(g);
       else selectGroup(g.id, false);
     };
-    if (state.listMode === "ignored") {
-      const b = document.createElement("button");
-      b.textContent = "Unignore";
-      b.onclick = async (ev) => {
-        ev.stopPropagation();
-        await apiPost("/api/unignore", {
-          group: state.currentTab,
-          md5s: g.ignored_md5s,
-        });
-        state.listJson = null;
-        pollState(true);
-      };
-      div.appendChild(b);
-    }
     el.appendChild(div);
   }
   if (stick) el.scrollTop = el.scrollHeight;
+  updateUnignoreBtn();
+}
+
+function updateUnignoreBtn() {
+  $("btn-unignore").disabled =
+    !state.ignored.some((g) => g.id === state.currentGid);
 }
 
 async function selectGroup(gid, fromAuto) {
@@ -259,7 +265,9 @@ async function selectGroup(gid, fromAuto) {
   }
   state.currentGid = gid;
   const working = loadStored("working", null);
-  state.dupgroup = working && working.id === gid ? working : null;
+  const stashed = completedGroups().find((g) => g.id === gid && g.hasOperations);
+  state.dupgroup = working && working.id === gid ? working :
+    stashed ? structuredClone(stashed) : null;
   state.dupJson = null;
   resetView();
   state.carouselIdx = 0;
@@ -462,6 +470,7 @@ function renderMain() {
   const btn = $("btn-complete");
   btn.disabled = !dg || !dg.can_complete;
   $("btn-ignore").disabled = !dg || !dg.can_ignore;
+  updateUnignoreBtn();
   const rows = $("rows");
   const stick = rows.scrollTop + rows.clientHeight >= rows.scrollHeight - 10;
   rows.innerHTML = "";
@@ -735,9 +744,6 @@ function applyCarouselView(img) {
 $("btn-ignore").onclick = async () => {
   const dg = state.dupgroup;
   if (!dg || !dg.can_ignore) return;
-  if (!(await showConfirm(
-    "Ignore this group? It will be hidden until its members change.")))
-    return;
   const md5s = [...new Set(dg.files.filter((f) => isPresentLike(f) && effectiveMd5(f)).map(effectiveMd5))];
   if (!md5s.length) return;
   const res = await apiPost("/api/ignore", { group: state.currentTab, md5s });
@@ -753,13 +759,25 @@ $("btn-ignore").onclick = async () => {
   await pollState(true);
 };
 
+$("btn-unignore").onclick = async () => {
+  const g = state.ignored.find((x) => x.id === state.currentGid);
+  if (!g) return;
+  const res = await apiPost("/api/unignore", {
+    group: state.currentTab,
+    md5s: g.ignored_md5s,
+  });
+  if (res.error) {
+    await showAlert(`${res.error}: ${res.message}`);
+    return;
+  }
+  state.listJson = null;
+  await pollState(true);
+};
+
 $("btn-complete").onclick = async () => {
   const dg = state.dupgroup;
   if (!dg || !dg.can_complete) return;
-  const completed = completedGroups().filter((g) => g.id !== dg.id);
-  completed.push({ ...structuredClone(dg), hasOperations: false });
-  localStorage.setItem(storageKey("completed"), JSON.stringify(completed.slice(-50)));
-  localStorage.removeItem(storageKey("working"));
+  stashToCompleted(dg, false);
   const idx = state.groups.findIndex((g) => g.id === dg.id);
   const prev = state.groups.slice(0, idx < 0 ? state.groups.length : idx)
     .reverse().find((g) => g.id !== dg.id);

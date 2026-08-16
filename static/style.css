@@ -20,6 +20,7 @@ body { display: flex; flex-direction: column; overflow: hidden; }
 .group-item.active { background: #2a2a4a; }
 .group-item.resolved { opacity: 0.45; }
 .group-item .level { font-weight: bold; margin-right: 6px; }
+.unfinished-tag { background: #630; color: #fc6; border-radius: 3px; padding: 0 5px; font-size: 10px; margin-left: 6px; }
 .level-Exact { color: #f55; }
 .level-VeryHigh { color: #f95; }
 .level-High { color: #fc5; }
