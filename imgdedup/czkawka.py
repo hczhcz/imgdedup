@@ -100,6 +100,7 @@ def _item(raw):
     return {
         "path": raw["path"],
         "size": raw["size"],
+        "mtime": raw["modified_date"],
         "width": raw["width"],
         "height": raw["height"],
         "similarity": raw["similarity"],

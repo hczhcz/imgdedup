@@ -170,15 +170,22 @@ class GroupRuntime:
             if ra != rb:
                 parent[rb] = ra
 
+        def current(item):
+            entry = file_index.get(item["path"])
+            if entry is None:
+                return False
+            size, mtime = entry
+            return size == item["size"] and abs(mtime - item["mtime"]) < 2
+
         similarity_of = {}
         for g in czkawka_groups:
-            base = g[0]["path"]
-            if base not in file_index:
+            if not current(g[0]):
                 continue
+            base = g[0]["path"]
             for item in g[1:]:
-                rp = item["path"]
-                if rp not in file_index:
+                if not current(item):
                     continue
+                rp = item["path"]
                 union(base, rp)
                 sim = item["similarity"]
                 if rp not in similarity_of or sim < similarity_of[rp]:

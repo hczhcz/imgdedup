@@ -326,44 +326,36 @@ async function refreshWorkingFiles() {
     }
     if (info.error) return;
     if (info.repo_kind) f.repo_kind = info.repo_kind;
-    if (info.in_library) {
-      f.moved_from = null;
-      f.moved_md5 = null;
-      f.status = "present";
-      f.size = info.lib_size;
-      f.mtime = info.lib_mtime;
-      return;
-    }
-    if (f.moved_md5 && f.moved_md5 !== f.md5) {
-      let mi;
-      try {
-        mi = await api("/api/file-state", {
-          group: state.currentTab, path: f.rel_path, md5: f.moved_md5,
-          repo_name: "",
-        });
-      } catch (e) {
-        return;
-      }
-      if (mi.error) return;
-      if (mi.in_library) {
-        f.status = "moved";
-        f.size = mi.lib_size;
-        f.mtime = mi.lib_mtime;
-        return;
-      }
-      f.moved_md5 = null;
-      f.moved_from = null;
-    }
-    if (info.in_repo) f.status = info.path_occupied ? "replaced" : "in_repo";
-    else f.status = info.path_occupied ? "replaced" : "missing";
-    if (f.status === "in_repo") {
-      f.size = info.repo_size;
-      f.mtime = info.repo_mtime;
-    } else {
-      f.size = info.lib_size;
-      f.mtime = info.lib_mtime;
-    }
+    f.fs = {
+      lib_md5: info.lib_md5,
+      occupied: info.path_occupied,
+      in_repo: info.in_repo,
+      lib_size: info.lib_size, lib_mtime: info.lib_mtime,
+      repo_size: info.repo_size, repo_mtime: info.repo_mtime,
+    };
   }));
+  for (const f of dg.files) {
+    const s = f.fs;
+    if (!s) continue;
+    f.moved_from = null;
+    if (s.lib_md5 && s.lib_md5 === f.md5) {
+      f.status = "present";
+    } else if (s.lib_md5 && dg.files.some((x) => x !== f && x.md5 === s.lib_md5)) {
+      f.status = "moved";
+      f.moved_from = dg.files.find((x) => x !== f && x.md5 === s.lib_md5).rel_path;
+    } else if (s.in_repo) {
+      f.status = s.occupied ? "replaced" : "in_repo";
+    } else {
+      f.status = s.occupied ? "replaced" : "missing";
+    }
+    if (f.status === "in_repo") {
+      f.size = s.repo_size;
+      f.mtime = s.repo_mtime;
+    } else {
+      f.size = s.lib_size;
+      f.mtime = s.lib_mtime;
+    }
+  }
   updateWorkingRules(dg);
   saveWorking();
 }
@@ -378,7 +370,7 @@ function updateWorkingRules(dg) {
   const gapsOk = !dg.keep_no_gap || dg.files.every((f) =>
     slotFilled(f) || f.is_last);
   dg.gaps_ok = gapsOk;
-  dg.can_complete = present.length === 1 && gapsOk;
+  dg.can_complete = present.length <= 1 && gapsOk;
   dg.can_ignore = present.length >= 2;
 }
 
@@ -387,7 +379,10 @@ function fileKey(f) {
 }
 
 function effectiveMd5(f) {
-  return f.status === "moved" ? f.moved_md5 : f.md5;
+  if (f.status === "moved" || f.status === "replaced")
+    return f.fs ? f.fs.lib_md5 : null;
+  if (f.status === "missing") return null;
+  return f.md5;
 }
 
 function identity(f) {
@@ -645,12 +640,6 @@ async function doAction(path, extra) {
   if (path === "/api/restore") {
     const file = state.dupgroup.files.find((f) => fileKey(f) === `${extra.path}\0${extra.md5}`);
     if (file) file.repo_path = null;
-  } else if (path === "/api/move") {
-    const target = state.dupgroup.files.find((x) => x.rel_path === extra.target);
-    if (target) {
-      target.moved_from = extra.path;
-      target.moved_md5 = extra.md5;
-    }
   }
   await refreshWorkingFiles();
   state.listJson = null;
