@@ -9,7 +9,6 @@ from . import czkawka, fileops, oplog
 from .config import LEVELS
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif", ".avif", ".jxl", ".heic"}
-INCREMENTAL_LIMIT = 200
 
 
 def is_image(path):
@@ -36,8 +35,7 @@ class GroupRuntime:
         self.repo_md5_cache = {}
         self.czkawka_groups = []
         self.tree_signature = None
-        self.czkawka_seen = set()
-        self.pending_new = set()
+        self.last_tree_change = 0.0
         self.ignored_sets = set()
         self.state_path = os.path.join(app_cfg.state_dir, f"{group_cfg.name}.json")
         self.stop_event = threading.Event()
@@ -339,17 +337,22 @@ class GroupRuntime:
             old = []
             for gid in sorted(self.groups.keys()):
                 g = self.groups[gid]
-                group_md5s = self.group_md5_set(g) if self.ignored_sets else None
+                group_md5s = None
+                if self.ignored_sets or g["level"] == "Original":
+                    group_md5s = self.group_md5_set(g)
                 ignored_set = group_md5s if group_md5s in self.ignored_sets else None
+                exact = (group_md5s is not None
+                         and g["level"] == "Original"
+                         and len(group_md5s) < len(g["files"]))
                 if ignored_set is not None:
-                    item = self._list_item(gid, g)
+                    item = self._list_item(gid, g, exact)
                     item["ignored_md5s"] = sorted(ignored_set)
                     ignored.append(item)
                     continue
                 if self.is_old(g):
-                    old.append(self._list_item(gid, g))
+                    old.append(self._list_item(gid, g, exact))
                     continue
-                items.append(self._list_item(gid, g))
+                items.append(self._list_item(gid, g, exact))
             key = lambda g: max(f["rel_path"] for f in g["files"])
             items.sort(key=key)
             ignored.sort(key=key)
@@ -357,7 +360,7 @@ class GroupRuntime:
             return {"version": self.version, "groups": items,
                     "ignored": ignored, "old": old}
 
-    def _list_item(self, gid, g):
+    def _list_item(self, gid, g, exact=False):
         files = []
         for rp in sorted(g["files"]):
             files.append({
@@ -368,7 +371,7 @@ class GroupRuntime:
             })
         return {
             "id": gid,
-            "level": g["level"],
+            "level": "Exact" if exact else g["level"],
             "created_at": g["created_at"],
             "files": files,
         }
@@ -517,38 +520,22 @@ class GroupRuntime:
                 file_index = self.walk_files()
                 sig = hash(tuple(sorted(file_index.items())))
                 tree_changed = sig != self.tree_signature
-                first = not self.first_scan_done.is_set()
                 with self.lock:
-                    prev_keys = set(self.czkawka_seen)
                     self.file_index = file_index
-                    if first:
-                        self.czkawka_seen = {(rp, s, m) for rp, (s, m) in file_index.items()}
-                if first:
+                if not self.first_scan_done.is_set():
                     self.first_scan_done.set()
                     self.czkawka_wakeup.set()
                 if tree_changed:
                     self.tree_signature = sig
-                    if not first:
-                        new_keys = {(rp, size, mtime) for rp, (size, mtime) in file_index.items()
-                                    if (rp, size, mtime) not in prev_keys}
-                        if new_keys:
-                            with self.lock:
-                                self.pending_new |= new_keys
-                            self.czkawka_wakeup.set()
+                    self.last_tree_change = time.time()
                     self._recompute(file_index)
+                    self.czkawka_wakeup.set()
             except Exception as e:
                 oplog.error("scan_loop_error", group=self.cfg.name, error=str(e))
             self.stop_event.wait(self.cfg.scan_interval)
 
-    def _merge_czkawka_results(self, new_groups):
-        with self.lock:
-            merged = {tuple(sorted(x["path"] for x in g)): g for g in self.czkawka_groups}
-            for g in new_groups:
-                merged[tuple(sorted(x["path"] for x in g))] = g
-            self.czkawka_groups = list(merged.values())
-
     def czkawka_loop(self):
-        last_full = 0.0
+        last_full_started = 0.0
         while not self.stop_event.is_set():
             self.czkawka_wakeup.clear()
             if not self.first_scan_done.is_set():
@@ -557,50 +544,23 @@ class GroupRuntime:
             try:
                 now = time.time()
                 with self.lock:
-                    pending = set(self.pending_new)
                     file_index = dict(self.file_index)
-                run_full = (now - last_full >= self.cfg.czkawka_full_interval
-                            or len(pending) > INCREMENTAL_LIMIT)
+                    last_tree_change = self.last_tree_change
+                run_full = (now - last_full_started >= self.cfg.czkawka_full_interval
+                            or last_tree_change > last_full_started)
                 if run_full:
+                    last_full_started = time.time()
                     raw = czkawka.run_image_scan(self.app_cfg, self.cfg)
                     if raw is not None:
-                        last_full = time.time()
                         groups = self._relativize(raw)
                         with self.lock:
                             self.czkawka_groups = groups
-                            self.czkawka_seen = {(rp, s, m) for rp, (s, m) in file_index.items()}
-                            self.pending_new -= pending
                         self._recompute(file_index)
                         oplog.log("czkawka_full_done", group=self.cfg.name,
                                   groups=len(groups))
-                elif pending:
-                    new_abs = []
-                    valid_keys = set()
-                    for key in pending:
-                        rp, size, mtime = key
-                        if file_index.get(rp) == (size, mtime):
-                            new_abs.append(self.abs_lib(rp))
-                            valid_keys.add(key)
-                    if new_abs:
-                        raw = czkawka.run_incremental_scan(self.app_cfg, self.cfg, new_abs)
-                        if raw is not None:
-                            groups = self._relativize(raw)
-                            self._merge_czkawka_results(groups)
-                            with self.lock:
-                                self.czkawka_seen |= valid_keys
-                                self.pending_new -= pending
-                            self._recompute(file_index)
-                            oplog.log("czkawka_incremental_done", group=self.cfg.name,
-                                      new_files=len(new_abs), groups=len(groups))
-                    else:
-                        with self.lock:
-                            self.pending_new -= pending
             except Exception as e:
                 oplog.error("czkawka_loop_error", group=self.cfg.name, error=str(e))
-            with self.lock:
-                has_pending = bool(self.pending_new)
-            timeout = 2.0 if has_pending else max(
-                5.0, self.cfg.czkawka_full_interval - (time.time() - last_full))
+            timeout = max(5.0, self.cfg.czkawka_full_interval - (time.time() - last_full_started))
             self.czkawka_wakeup.wait(min(timeout, 30.0))
 
     def start(self):

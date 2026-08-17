@@ -1,18 +1,17 @@
 import json
 import os
-import shutil
 import subprocess
 
 from . import oplog
 
 SIMILAR_VALUES = {
-    8: [1, 2, 5, 7, 14, 20],
-    16: [2, 5, 15, 30, 40, 40],
-    32: [4, 10, 20, 40, 80, 80],
-    64: [6, 20, 40, 80, 160, 160],
+    8: [0, 1, 2, 5, 7, 14, 20],
+    16: [0, 2, 5, 15, 30, 40, 40],
+    32: [0, 4, 10, 20, 40, 80, 80],
+    64: [0, 6, 20, 40, 80, 160, 160],
 }
 
-LEVEL_ORDER = ["VeryHigh", "High", "Medium", "Small", "VerySmall", "Minimal"]
+LEVEL_ORDER = ["Original", "VeryHigh", "High", "Medium", "Small", "VerySmall", "Minimal"]
 
 
 def classify_similarity(similarity, hash_size):
@@ -38,18 +37,6 @@ def _work_dir(cfg, group):
 
 def _full_out(cfg, group):
     return os.path.join(_work_dir(cfg, group), "full.json")
-
-
-def _warm_dir(cfg, group):
-    return os.path.join(_work_dir(cfg, group), "warm")
-
-
-def _warm_out(cfg, group):
-    return os.path.join(_work_dir(cfg, group), "warm.json")
-
-
-def _inner_out(cfg, group):
-    return os.path.join(_work_dir(cfg, group), "inner.json")
 
 
 def _base_cmd(cfg, group, out_path):
@@ -119,58 +106,4 @@ def run_image_scan(cfg, group):
         files = [_item(item) for item in g]
         if len(files) >= 2:
             result.append(files)
-    return result
-
-
-def run_incremental_scan(cfg, group, new_abs_paths):
-    warm_dir = _warm_dir(cfg, group)
-    shutil.rmtree(warm_dir, ignore_errors=True)
-    os.makedirs(warm_dir)
-    mapping = {}
-    for i, ap in enumerate(new_abs_paths):
-        ext = os.path.splitext(ap)[1]
-        warm_path = os.path.join(warm_dir, f"{i:06d}{ext}")
-        try:
-            shutil.copy2(ap, warm_path)
-            mapping[warm_path] = ap
-        except OSError:
-            continue
-    if not mapping:
-        return []
-    out_path = _warm_out(cfg, group)
-    cmd = _base_cmd(cfg, group, out_path)
-    cmd += ["-d", warm_dir, "-r", group.library_root]
-    raw = _run(cfg, group, cmd, out_path, "incremental")
-    if raw is None:
-        return None
-    result = []
-    for g in raw:
-        ref, others = g[0], g[1]
-        files = [_item(ref)]
-        for item in others:
-            real = mapping.get(item["path"])
-            if real is None or real == ref["path"]:
-                continue
-            it = _item(item)
-            it["path"] = real
-            files.append(it)
-        if len(files) >= 2:
-            result.append(files)
-    if len(mapping) >= 2:
-        inner_out = _inner_out(cfg, group)
-        cmd = _base_cmd(cfg, group, inner_out)
-        cmd += ["-d", warm_dir]
-        raw = _run(cfg, group, cmd, inner_out, "incremental-inner")
-        if raw is not None:
-            for g in raw:
-                files = []
-                for item in g:
-                    real = mapping.get(item["path"])
-                    if real is None:
-                        continue
-                    it = _item(item)
-                    it["path"] = real
-                    files.append(it)
-                if len(files) >= 2:
-                    result.append(files)
     return result
