@@ -39,6 +39,14 @@ def _full_out(cfg, group):
     return os.path.join(_work_dir(cfg, group), "full.json")
 
 
+def _incr_out(cfg, group):
+    return os.path.join(_work_dir(cfg, group), "incr.json")
+
+
+def _inner_out(cfg, group):
+    return os.path.join(_work_dir(cfg, group), "inner.json")
+
+
 def _base_cmd(cfg, group, out_path):
     cmd = [
         cfg.czkawka_cli, "image",
@@ -102,6 +110,43 @@ def run_image_scan(cfg, group):
     if raw is None:
         return None
     result = []
+    for g in raw:
+        files = [_item(item) for item in g]
+        if len(files) >= 2:
+            result.append(files)
+    return result
+
+
+def run_incremental_scan(cfg, group, main_dirs, ref_dirs):
+    result = []
+    if not main_dirs:
+        return result
+    if ref_dirs:
+        out_path = _incr_out(cfg, group)
+        cmd = _base_cmd(cfg, group, out_path)
+        for d in main_dirs:
+            cmd += ["-d", d]
+        for r in ref_dirs:
+            cmd += ["-r", r]
+        raw = _run(cfg, group, cmd, out_path, "incremental-ref")
+        if raw is None:
+            return None
+        for g in raw:
+            if len(g) < 2:
+                continue
+            files = [_item(g[0])]
+            others = g[1] if isinstance(g[1], list) else [g[1]]
+            for item in others:
+                files.append(_item(item))
+            if len(files) >= 2:
+                result.append(files)
+    inner_out = _inner_out(cfg, group)
+    cmd = _base_cmd(cfg, group, inner_out)
+    for d in main_dirs:
+        cmd += ["-d", d]
+    raw = _run(cfg, group, cmd, inner_out, "incremental-inner")
+    if raw is None:
+        return None
     for g in raw:
         files = [_item(item) for item in g]
         if len(files) >= 2:

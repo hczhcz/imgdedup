@@ -34,8 +34,7 @@ class GroupRuntime:
         self.md5_cache = {}
         self.repo_md5_cache = {}
         self.czkawka_groups = []
-        self.tree_signature = None
-        self.last_tree_change = 0.0
+        self.changed_dirs = set()
         self.ignored_sets = set()
         self.state_path = os.path.join(app_cfg.state_dir, f"{group_cfg.name}.json")
         self.stop_event = threading.Event()
@@ -68,6 +67,9 @@ class GroupRuntime:
 
     def rel(self, abs_path):
         return os.path.relpath(abs_path, self.cfg.library_root)
+
+    def top_dir(self, rel_path):
+        return rel_path.split(os.sep, 1)[0] if os.sep in rel_path else ""
 
     def abs_lib(self, rel_path):
         p = os.path.abspath(os.path.join(self.cfg.library_root, rel_path))
@@ -426,7 +428,7 @@ class GroupRuntime:
             self.file_index.pop(rel_path, None)
             oplog.log("action_move_to_repo", group=self.cfg.name, file=rel_path,
                       md5=md5, repo_name=name, repo_kind=kind)
-            self._after_action()
+            self._after_action([rel_path])
             return kind
 
     def act_restore(self, rel_path, md5, repo_name):
@@ -446,7 +448,7 @@ class GroupRuntime:
                 pass
             oplog.log("action_restore", group=self.cfg.name, file=rel_path, md5=md5,
                       repo_name=repo_name, repo_kind=kind)
-            self._after_action()
+            self._after_action([rel_path])
 
     def act_move(self, rel_path, md5, target_rel_path):
         with self.lock:
@@ -463,7 +465,7 @@ class GroupRuntime:
                 pass
             oplog.log("action_move", group=self.cfg.name, src=rel_path, md5=md5,
                       dst=target_rel_path)
-            self._after_action()
+            self._after_action([rel_path, target_rel_path])
 
     def act_ignore(self, md5s):
         with self.lock:
@@ -485,10 +487,12 @@ class GroupRuntime:
             self.save_state()
             self.bump()
 
-    def _after_action(self):
-        self.tree_signature = None
+    def _after_action(self, rel_paths=()):
+        with self.lock:
+            self.changed_dirs |= {self.top_dir(rp) for rp in rel_paths}
         self._recompute(dict(self.file_index))
         self.bump()
+        self.czkawka_wakeup.set()
 
     def _relativize(self, raw):
         root = self.cfg.library_root.rstrip(os.sep) + os.sep
@@ -509,20 +513,35 @@ class GroupRuntime:
         self.reconcile(scanned, file_index)
         self.evict_md5_cache(file_index)
 
+    def _merge_czkawka_results(self, new_groups):
+        with self.lock:
+            merged = {tuple(sorted(x["path"] for x in g)): g for g in self.czkawka_groups}
+            for g in new_groups:
+                merged[tuple(sorted(x["path"] for x in g))] = g
+            self.czkawka_groups = list(merged.values())
+
+    def _incremental_dirs(self, file_index, changed_dirs):
+        all_top = {self.top_dir(rp) for rp in file_index}
+        main = sorted(d for d in changed_dirs if d in all_top)
+        ref = sorted(all_top - set(main))
+        return [self.abs_lib(d) for d in main], [self.abs_lib(d) for d in ref]
+
     def scan_loop(self):
         while not self.stop_event.is_set():
             try:
                 file_index = self.walk_files()
-                sig = hash(tuple(sorted(file_index.items())))
-                tree_changed = sig != self.tree_signature
                 with self.lock:
+                    prev = self.file_index
                     self.file_index = file_index
                 if not self.first_scan_done.is_set():
                     self.first_scan_done.set()
                     self.czkawka_wakeup.set()
-                if tree_changed:
-                    self.tree_signature = sig
-                    self.last_tree_change = time.time()
+                added = [rp for rp, v in file_index.items() if prev.get(rp) != v]
+                removed = [rp for rp in prev if rp not in file_index]
+                if added or removed:
+                    if added:
+                        with self.lock:
+                            self.changed_dirs |= {self.top_dir(rp) for rp in added}
                     self._recompute(file_index)
                     self.czkawka_wakeup.set()
             except Exception as e:
@@ -540,22 +559,40 @@ class GroupRuntime:
                 now = time.time()
                 with self.lock:
                     file_index = dict(self.file_index)
-                    last_tree_change = self.last_tree_change
-                run_full = (now - last_full_started >= self.cfg.czkawka_full_interval
-                            or last_tree_change > last_full_started)
-                if run_full:
+                    changed_dirs = set(self.changed_dirs)
+                if now - last_full_started >= self.cfg.czkawka_full_interval:
                     last_full_started = time.time()
                     raw = czkawka.run_image_scan(self.app_cfg, self.cfg)
                     if raw is not None:
                         groups = self._relativize(raw)
                         with self.lock:
                             self.czkawka_groups = groups
+                            self.changed_dirs = set()
                         self._recompute(file_index)
                         oplog.log("czkawka_full_done", group=self.cfg.name,
                                   groups=len(groups))
+                elif changed_dirs:
+                    main_dirs, ref_dirs = self._incremental_dirs(file_index, changed_dirs)
+                    if main_dirs:
+                        raw = czkawka.run_incremental_scan(self.app_cfg, self.cfg,
+                                                           main_dirs, ref_dirs)
+                        if raw is not None:
+                            groups = self._relativize(raw)
+                            self._merge_czkawka_results(groups)
+                            with self.lock:
+                                self.changed_dirs -= changed_dirs
+                            self._recompute(file_index)
+                            oplog.log("czkawka_incremental_done", group=self.cfg.name,
+                                      dirs=len(main_dirs), groups=len(groups))
+                    else:
+                        with self.lock:
+                            self.changed_dirs -= changed_dirs
             except Exception as e:
                 oplog.error("czkawka_loop_error", group=self.cfg.name, error=str(e))
-            timeout = max(5.0, self.cfg.czkawka_full_interval - (time.time() - last_full_started))
+            with self.lock:
+                has_changed = bool(self.changed_dirs)
+            timeout = 2.0 if has_changed else max(
+                5.0, self.cfg.czkawka_full_interval - (time.time() - last_full_started))
             self.czkawka_wakeup.wait(min(timeout, 30.0))
 
     def start(self):
