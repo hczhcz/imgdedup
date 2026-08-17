@@ -24,7 +24,7 @@ function loadStored(suffix, fallback) {
 }
 
 function saveWorking() {
-  if (state.dupgroup && state.dupgroup.hasOperations)
+  if (state.dupgroup && state.dupgroup.hasOperations && !state.dupgroup.isCompleted)
     localStorage.setItem(storageKey("working"), JSON.stringify(state.dupgroup));
   else
     localStorage.removeItem(storageKey("working"));
@@ -137,7 +137,7 @@ function stashToCompleted(dg, hasOps) {
 
 async function guardLeaveGroup() {
   const dg = state.dupgroup;
-  if (!dg || !dg.hasOperations) return true;
+  if (!dg || !dg.hasOperations || dg.isCompleted) return true;
   const present = dg.files.filter(isPresentLike);
   const text = dg.keep_no_gap && !dg.gaps_ok && present.length === 1
     ? "This group leaves a gap in the sequence. Move it to Completed and leave?"
@@ -198,6 +198,13 @@ function listSource(mode) {
     mode === "old" ? state.old : state.groups;
 }
 
+function updateListHighlight() {
+  const target = state.currentGid != null ? String(state.currentGid) : "";
+  for (const el of $("grouplist").children) {
+    el.classList.toggle("active", el.dataset.gid === target);
+  }
+}
+
 function renderGroupList() {
   for (const b of $("list-tabs").querySelectorAll("button")) {
     const label = b.dataset.mode[0].toUpperCase() + b.dataset.mode.slice(1);
@@ -217,6 +224,7 @@ function renderGroupList() {
   for (const g of source) {
     const div = document.createElement("div");
     div.className = "group-item" + (g.id === state.currentGid ? " active" : "");
+    div.dataset.gid = g.id;
     const head = document.createElement("div");
     const lv = document.createElement("span");
     lv.className = "level level-" + g.level;
@@ -271,10 +279,7 @@ async function selectGroup(gid, fromAuto) {
   state.dupJson = null;
   resetView();
   state.carouselIdx = 0;
-  for (const el of $("grouplist").children) {
-    el.classList.toggle("active",
-      el.firstChild && el.firstChild.textContent.endsWith("#" + gid));
-  }
+  updateListHighlight();
   await loadDupgroup();
   const rows = $("rows");
   rows.scrollTop = rows.scrollHeight;
@@ -284,9 +289,11 @@ async function selectStoredGroup(group) {
   if (!(await guardLeaveGroup())) return;
   state.currentGid = group.id;
   state.dupgroup = structuredClone(group);
+  state.dupgroup.isCompleted = true;
   state.dupJson = null;
   state.autoFollow = false;
   resetView();
+  updateListHighlight();
   refreshWorkingFiles().then(() => {
     state.dupJson = JSON.stringify(state.dupgroup);
     renderMain();

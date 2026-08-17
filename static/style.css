@@ -22,6 +22,7 @@ body { display: flex; flex-direction: column; overflow: hidden; }
 .group-item .level { font-weight: bold; margin-right: 6px; }
 .unfinished-tag { background: #630; color: #fc6; border-radius: 3px; padding: 0 5px; font-size: 10px; margin-left: 6px; }
 .level-Exact { color: #f55; }
+.level-Original { color: #f66; }
 .level-VeryHigh { color: #f95; }
 .level-High { color: #fc5; }
 .level-Medium { color: #cf5; }

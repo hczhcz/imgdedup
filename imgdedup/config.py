@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 
 DEFAULT_CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.json")
 
-LEVELS = ["Minimal", "VerySmall", "Small", "Medium", "High", "VeryHigh", "Exact"]
+LEVELS = ["Minimal", "VerySmall", "Small", "Medium", "High", "VeryHigh", "Original", "Exact"]
 
 
 @dataclass
