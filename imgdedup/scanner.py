@@ -111,13 +111,13 @@ class GroupRuntime:
                     continue
                 if st.st_size < self.cfg.min_file_size:
                     continue
-                result[self.rel(ap)] = (st.st_size, st.st_mtime)
+                result[self.rel(ap)] = (st.st_size, st.st_mtime, st.st_ctime)
         return result
 
     def get_md5(self, rp, file_index):
         if rp not in file_index:
             return None
-        size, mtime = file_index[rp]
+        size, mtime, _ = file_index[rp]
         key = (rp, size, mtime)
         md5 = self.md5_cache.get(key)
         if md5 is None:
@@ -129,7 +129,8 @@ class GroupRuntime:
         return md5
 
     def evict_md5_cache(self, file_index):
-        stale = [k for k in self.md5_cache if k[0] not in file_index or file_index[k[0]] != (k[1], k[2])]
+        stale = [k for k in self.md5_cache
+                 if k[0] not in file_index or file_index[k[0]][:2] != (k[1], k[2])]
         for k in stale:
             del self.md5_cache[k]
 
@@ -138,17 +139,15 @@ class GroupRuntime:
             st = os.stat(path)
         except OSError:
             return None
-        key = (path, st.st_size, st.st_mtime)
-        md5 = self.repo_md5_cache.get(key)
-        if md5 is None:
-            try:
-                md5 = file_md5(path)
-            except OSError:
-                return None
-            self.repo_md5_cache[key] = md5
-        stale = [k for k in self.repo_md5_cache if k[0] == path and k != key]
-        for old in stale:
-            del self.repo_md5_cache[old]
+        key = (st.st_size, st.st_mtime)
+        entry = self.repo_md5_cache.get(path)
+        if entry is not None and entry[0] == key:
+            return entry[1]
+        try:
+            md5 = file_md5(path)
+        except OSError:
+            return None
+        self.repo_md5_cache[path] = (key, md5)
         return md5
 
     def merge_groups(self, czkawka_groups, file_index):
@@ -172,7 +171,7 @@ class GroupRuntime:
             entry = file_index.get(item["path"])
             if entry is None:
                 return False
-            size, mtime = entry
+            size, mtime, _ = entry
             return size == item["size"] and abs(mtime - item["mtime"]) < 2
 
         similarity_of = {}
@@ -285,15 +284,10 @@ class GroupRuntime:
                 if base in siblings:
                     idx = siblings.index(base)
                 else:
-                    idx = None
-                    for i, s in enumerate(siblings):
-                        if s > base:
-                            idx = i
-                            break
-                    if idx is None:
-                        idx = len(siblings)
+                    idx = 0
+                    while idx < len(siblings) and siblings[idx] < base:
+                        idx += 1
                     siblings = siblings[:idx] + [None] + siblings[idx:]
-                    idx = siblings.index(None)
                 for s in siblings[max(0, idx - 5):idx]:
                     if s is not None:
                         rp2 = os.path.join(d, s) if d else s
@@ -316,7 +310,7 @@ class GroupRuntime:
 
     def _dir_siblings(self, rel_dir):
         try:
-            abs_dir = self.abs_lib(rel_dir) if rel_dir else self.cfg.library_root
+            abs_dir = self.abs_lib(rel_dir)
             names = [n for n in os.listdir(abs_dir)
                      if is_image(n) and os.path.isfile(os.path.join(abs_dir, n))
                      and not self.excluded(os.path.join(abs_dir, n))]
@@ -327,7 +321,8 @@ class GroupRuntime:
     def is_old(self, g):
         if self.cfg.hide_before is None:
             return False
-        mtimes = [self.file_index[rp][1] for rp in g["files"] if rp in self.file_index]
+        mtimes = [max(self.file_index[rp][1], self.file_index[rp][2])
+                  for rp in g["files"] if rp in self.file_index]
         return bool(mtimes) and all(m < self.cfg.hide_before for m in mtimes)
 
     def list_snapshot(self):
@@ -408,7 +403,7 @@ class GroupRuntime:
 
     def library_has_md5(self, md5, size, exclude=None):
         with self.lock:
-            candidates = [rp for rp, (sz, _) in self.file_index.items()
+            candidates = [rp for rp, (sz, _, _) in self.file_index.items()
                           if sz == size and rp != exclude]
         for rp in candidates:
             if self.get_md5(rp, self.file_index) == md5:
@@ -446,7 +441,7 @@ class GroupRuntime:
             fileops.safe_move(src, dst)
             try:
                 st = os.stat(dst)
-                self.file_index[rel_path] = (st.st_size, st.st_mtime)
+                self.file_index[rel_path] = (st.st_size, st.st_mtime, st.st_ctime)
             except OSError:
                 pass
             oplog.log("action_restore", group=self.cfg.name, file=rel_path, md5=md5,
@@ -463,7 +458,7 @@ class GroupRuntime:
             self.file_index.pop(rel_path, None)
             try:
                 st = os.stat(dst)
-                self.file_index[target_rel_path] = (st.st_size, st.st_mtime)
+                self.file_index[target_rel_path] = (st.st_size, st.st_mtime, st.st_ctime)
             except OSError:
                 pass
             oplog.log("action_move", group=self.cfg.name, src=rel_path, md5=md5,

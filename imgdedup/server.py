@@ -54,7 +54,6 @@ def image_dimensions(abs_path):
 
 class Handler(BaseHTTPRequestHandler):
     runtimes = {}
-    app_cfg = None
 
     def log_message(self, fmt, *args):
         pass
@@ -279,7 +278,6 @@ class Handler(BaseHTTPRequestHandler):
 
 def run_server(app_cfg, runtimes):
     Handler.runtimes = runtimes
-    Handler.app_cfg = app_cfg
     server = ThreadingHTTPServer(("127.0.0.1", app_cfg.port), Handler)
     oplog.log("server_started", port=app_cfg.port)
     server.serve_forever()

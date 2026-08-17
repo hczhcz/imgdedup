@@ -5,7 +5,6 @@ body { display: flex; flex-direction: column; overflow: hidden; }
 #tabs { display: flex; background: #111; border-bottom: 1px solid #333; flex: none; }
 #tabs .tab { padding: 8px 18px; cursor: pointer; border-right: 1px solid #333; user-select: none; }
 #tabs .tab.active { background: #2a2a4a; color: #fff; }
-#tabs .tab .badge { background: #c33; color: #fff; border-radius: 8px; padding: 0 6px; font-size: 11px; margin-left: 6px; }
 
 #layout { display: flex; flex: 1; min-height: 0; }
 
@@ -18,7 +17,6 @@ body { display: flex; flex-direction: column; overflow: hidden; }
 .group-item { padding: 6px 8px; border-bottom: 1px solid #2a2a2a; cursor: pointer; font-size: 12px; }
 .group-item:hover { background: #2a2a2a; }
 .group-item.active { background: #2a2a4a; }
-.group-item.resolved { opacity: 0.45; }
 .group-item .level { font-weight: bold; margin-right: 6px; }
 .unfinished-tag { background: #630; color: #fc6; border-radius: 3px; padding: 0 5px; font-size: 10px; margin-left: 6px; }
 .level-Exact { color: #f55; }
