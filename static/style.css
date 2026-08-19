@@ -12,6 +12,9 @@ body { display: flex; flex-direction: column; overflow: hidden; }
 #list-tabs { display: flex; flex: none; border-bottom: 1px solid #333; }
 #list-tabs button { flex: 1; border: 0; border-radius: 0; padding: 7px 2px; position: relative; overflow: visible; }
 #list-tabs button.active { background: #2a2a4a; color: #fff; }
+#completed-tools { flex: none; border-bottom: 1px solid #333; padding: 4px; }
+#completed-tools.hidden { display: none; }
+#btn-clear-completed { width: 100%; }
 .count-badge { position: absolute; top: 1px; right: 2px; background: #c60; color: #fff; border-radius: 8px; padding: 0 5px; font-size: 10px; line-height: 14px; pointer-events: none; }
 #grouplist { flex: 1; overflow-y: auto; min-height: 0; }
 .group-item { padding: 6px 8px; border-bottom: 1px solid #2a2a2a; cursor: pointer; font-size: 12px; }
@@ -52,17 +55,18 @@ button.danger:hover:not(:disabled) { background: #644; }
 .dup-row { display: flex; border-bottom: 2px solid #333; flex: 1 0 200px; min-height: 200px; }
 .dup-row.md5-dup { border-left: 4px solid #f55; background: #241a1a; }
 .md5-flag { color: #f55; font-weight: bold; }
-.neighbors { flex: none; width: 90px; display: flex; flex-direction: column; justify-content: center; gap: 4px; padding: 4px; }
-.neighbor { position: relative; cursor: default; flex: 0 1 18%; min-height: 0; }
-.neighbor img { width: 100%; height: 100%; object-fit: contain; display: block; background: #141414; }
-.neighbor.has-dup { outline: 2px solid #f80; cursor: pointer; }
-.neighbor .ntip { display: none; position: absolute; left: 0; bottom: 100%; background: #000; padding: 2px 4px; font-size: 10px; white-space: nowrap; z-index: 5; }
-.neighbor:hover .ntip { display: block; }
-
-.dup-viewport { flex: 1; position: relative; overflow: hidden; background: #141414; cursor: grab; min-width: 0; }
+.dup-viewport { flex: 2; position: relative; overflow: hidden; background: #141414; cursor: grab; min-width: 0; }
 .dup-viewport.dragging { cursor: grabbing; }
 .dup-viewport img { position: absolute; transform-origin: 0 0; user-select: none; -webkit-user-drag: none; }
 .dup-viewport .placeholder { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #666; font-size: 14px; }
+
+.neighbor-grid { flex: 1; display: grid; grid-template-columns: repeat(3, 1fr); grid-template-rows: repeat(3, 1fr); gap: 3px; padding: 3px; background: #1a1a1a; min-width: 0; min-height: 0; }
+.ngrid-cell { position: relative; overflow: hidden; background: #141414; min-width: 0; min-height: 0; }
+.ngrid-cell img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.ngrid-cell.cur { outline: 2px solid #6cf; }
+.ngrid-cell.has-dup { outline: 2px solid #f80; cursor: pointer; }
+.ngrid-cell .ntip { display: none; position: absolute; left: 0; bottom: 100%; background: #000; padding: 2px 4px; font-size: 10px; white-space: nowrap; z-index: 5; }
+.ngrid-cell:hover .ntip { display: block; }
 
 .dup-side { flex: none; width: 300px; padding: 8px; display: flex; flex-direction: column; gap: 6px; font-size: 12px; border-left: 1px solid #2a2a2a; cursor: copy; }
 .dup-side .actions { cursor: default; }

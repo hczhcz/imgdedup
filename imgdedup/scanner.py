@@ -28,7 +28,6 @@ class GroupRuntime:
         self.app_cfg = app_cfg
         self.cfg = group_cfg
         self.lock = threading.RLock()
-        self.version = 0
         self.groups = {}
         self.file_index = {}
         self.md5_cache = {}
@@ -62,14 +61,11 @@ class GroupRuntime:
                 json.dump(data, f, ensure_ascii=False, indent=1)
             os.replace(tmp, self.state_path)
 
-    def bump(self):
-        self.version += 1
-
     def rel(self, abs_path):
         return os.path.relpath(abs_path, self.cfg.library_root)
 
-    def top_dir(self, rel_path):
-        return rel_path.split(os.sep, 1)[0] if os.sep in rel_path else ""
+    def file_dir(self, rel_path):
+        return os.path.dirname(rel_path)
 
     def abs_lib(self, rel_path):
         p = os.path.abspath(os.path.join(self.cfg.library_root, rel_path))
@@ -208,7 +204,7 @@ class GroupRuntime:
             scanned.append({"members": sorted(members), "level": level})
         return scanned
 
-    def reconcile(self, scanned, file_index):
+    def reconcile(self, scanned):
         with self.lock:
             groups = {}
             for sg in scanned:
@@ -224,13 +220,7 @@ class GroupRuntime:
                     "level": sg["level"],
                     "created_at": old["created_at"] if old else time.time(),
                 }
-            before = {(gid, g["level"], tuple(g["files"])) for gid, g in self.groups.items()}
-            after = {(gid, g["level"], tuple(g["files"])) for gid, g in groups.items()}
-            changed = before != after
             self.groups = groups
-            if changed:
-                self.bump()
-            return changed
 
     def group_md5_set(self, g):
         md5s = set()
@@ -246,6 +236,17 @@ class GroupRuntime:
             return False
         s = self.group_md5_set(g)
         return s is not None and s in self.ignored_sets
+
+    def has_exact_pair(self, g):
+        seen = set()
+        for rp in g["files"]:
+            md5 = self.get_md5(rp, self.file_index)
+            if md5 is None:
+                continue
+            if md5 in seen:
+                return True
+            seen.add(md5)
+        return False
 
     def group_snapshot(self, gid):
         with self.lock:
@@ -290,12 +291,12 @@ class GroupRuntime:
                     while idx < len(siblings) and siblings[idx] < base:
                         idx += 1
                     siblings = siblings[:idx] + [None] + siblings[idx:]
-                for s in siblings[max(0, idx - 5):idx]:
+                for s in siblings[max(0, idx - 4):idx]:
                     if s is not None:
                         rp2 = os.path.join(d, s) if d else s
                         info["neighbors_prev"].append(
                             {"rel_path": rp2, "dup_gid": dir_dups.get(s)})
-                for s in siblings[idx + 1:idx + 6]:
+                for s in siblings[idx + 1:idx + 5]:
                     if s is not None:
                         rp2 = os.path.join(d, s) if d else s
                         info["neighbors_next"].append(
@@ -334,13 +335,9 @@ class GroupRuntime:
             old = []
             for gid in sorted(self.groups.keys()):
                 g = self.groups[gid]
-                group_md5s = None
-                if self.ignored_sets or g["level"] == "Original":
-                    group_md5s = self.group_md5_set(g)
+                exact = self.has_exact_pair(g)
+                group_md5s = self.group_md5_set(g) if self.ignored_sets else None
                 ignored_set = group_md5s if group_md5s in self.ignored_sets else None
-                exact = (group_md5s is not None
-                         and g["level"] == "Original"
-                         and len(group_md5s) < len(g["files"]))
                 if ignored_set is not None:
                     item = self._list_item(gid, g, exact)
                     item["ignored_md5s"] = sorted(ignored_set)
@@ -354,8 +351,7 @@ class GroupRuntime:
             items.sort(key=key)
             ignored.sort(key=key)
             old.sort(key=key)
-            return {"version": self.version, "groups": items,
-                    "ignored": ignored, "old": old}
+            return {"groups": items, "ignored": ignored, "old": old}
 
     def _list_item(self, gid, g, exact=False):
         files = []
@@ -475,7 +471,6 @@ class GroupRuntime:
             self.ignored_sets.add(s)
             oplog.log("action_ignore", group=self.cfg.name, md5s=sorted(s))
             self.save_state()
-            self.bump()
 
     def act_unignore(self, md5s):
         with self.lock:
@@ -485,13 +480,11 @@ class GroupRuntime:
             self.ignored_sets.discard(s)
             oplog.log("action_unignore", group=self.cfg.name, md5s=sorted(s))
             self.save_state()
-            self.bump()
 
     def _after_action(self, rel_paths=()):
         with self.lock:
-            self.changed_dirs |= {self.top_dir(rp) for rp in rel_paths}
+            self.changed_dirs |= {self.file_dir(rp) for rp in rel_paths}
         self._recompute(dict(self.file_index))
-        self.bump()
         self.czkawka_wakeup.set()
 
     def _relativize(self, raw):
@@ -510,7 +503,7 @@ class GroupRuntime:
         with self.lock:
             czkawka_groups = list(self.czkawka_groups)
         scanned = self.merge_groups(czkawka_groups, file_index)
-        self.reconcile(scanned, file_index)
+        self.reconcile(scanned)
         self.evict_md5_cache(file_index)
 
     def _merge_czkawka_results(self, new_groups):
@@ -520,11 +513,40 @@ class GroupRuntime:
                 merged[tuple(sorted(x["path"] for x in g))] = g
             self.czkawka_groups = list(merged.values())
 
+    @staticmethod
+    def _is_under(path, base):
+        return path == base or path.startswith(base + os.sep)
+
+    def _minimal_dirs(self, dirs):
+        out = []
+        for d in sorted(dirs):
+            if not any(self._is_under(d, o) for o in out):
+                out.append(d)
+        return out
+
     def _incremental_dirs(self, file_index, changed_dirs):
-        all_top = {self.top_dir(rp) for rp in file_index}
-        main = sorted(d for d in changed_dirs if d in all_top)
-        ref = sorted(all_top - set(main))
-        return [self.abs_lib(d) for d in main], [self.abs_lib(d) for d in ref]
+        if "" in changed_dirs:
+            return [self.cfg.library_root], []
+        all_dirs = {os.path.dirname(rp) for rp in file_index}
+        all_dirs.discard("")
+        main = {d for d in changed_dirs if d}
+        expanded = True
+        while expanded:
+            expanded = False
+            for d in list(main):
+                anc = os.path.dirname(d)
+                while anc:
+                    if anc in all_dirs:
+                        if anc not in main:
+                            main.add(anc)
+                            expanded = True
+                        break
+                    anc = os.path.dirname(anc)
+        main = set(self._minimal_dirs(main))
+        ref = {d for d in all_dirs
+               if not any(self._is_under(d, m) or self._is_under(m, d) for m in main)}
+        ref = set(self._minimal_dirs(ref))
+        return [self.abs_lib(d) for d in sorted(main)], [self.abs_lib(d) for d in sorted(ref)]
 
     def scan_loop(self):
         while not self.stop_event.is_set():
@@ -541,7 +563,7 @@ class GroupRuntime:
                 if added or removed:
                     if added:
                         with self.lock:
-                            self.changed_dirs |= {self.top_dir(rp) for rp in added}
+                            self.changed_dirs |= {self.file_dir(rp) for rp in added}
                     self._recompute(file_index)
                     self.czkawka_wakeup.set()
             except Exception as e:
@@ -567,7 +589,6 @@ class GroupRuntime:
                         groups = self._relativize(raw)
                         with self.lock:
                             self.czkawka_groups = groups
-                            self.changed_dirs = set()
                         self._recompute(file_index)
                         oplog.log("czkawka_full_done", group=self.cfg.name,
                                   groups=len(groups))

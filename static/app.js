@@ -385,7 +385,7 @@ function updateWorkingRules(dg) {
   const gapsOk = !dg.keep_no_gap || dg.files.every((f) =>
     slotFilled(f) || f.is_last);
   dg.gaps_ok = gapsOk;
-  dg.can_complete = present.length <= 1 && gapsOk;
+  dg.can_complete = present.length === 1 && gapsOk;
   dg.can_ignore = present.length >= 2;
 }
 
@@ -499,36 +499,48 @@ function renderMain() {
   renderCarousel();
 }
 
-function renderNeighborCol(neighbors) {
-  const col = document.createElement("div");
-  col.className = "neighbors";
-  for (const n of neighbors) {
-    const d = document.createElement("div");
-    d.className = "neighbor" + (n.dup_gid != null ? " has-dup" : "");
-    const img = document.createElement("img");
-    img.loading = "lazy";
-    img.src = thumbUrl(n.rel_path);
-    d.appendChild(img);
-    const tip = document.createElement("div");
-    tip.className = "ntip";
-    tip.textContent = n.rel_path.split("/").pop() +
-      (n.dup_gid != null ? ` (dup #${n.dup_gid})` : "");
-    d.appendChild(tip);
-    if (n.dup_gid != null) {
-      d.onclick = () => {
-        state.autoFollow = false;
-        selectGroup(n.dup_gid, false);
-      };
-    }
-    col.appendChild(d);
+function renderNeighborGrid(f) {
+  const grid = document.createElement("div");
+  grid.className = "neighbor-grid";
+  const cells = new Array(9).fill(null);
+  const prev = f.neighbors_prev || [];
+  const next = f.neighbors_next || [];
+  for (let i = 0; i < prev.length; i++) {
+    const p = prev[prev.length - 1 - i];
+    if (p) cells[3 - i] = { ...p };
   }
-  return col;
+  cells[4] = { rel_path: f.rel_path, dup_gid: null, cur: true };
+  for (let i = 0; i < next.length; i++)
+    cells[5 + i] = { ...next[i] };
+  for (const c of cells) {
+    const cell = document.createElement("div");
+    cell.className = "ngrid-cell" + (c && c.cur ? " cur" : "") +
+      (c && c.dup_gid != null ? " has-dup" : "");
+    if (c) {
+      const img = document.createElement("img");
+      img.loading = "lazy";
+      img.src = thumbUrl(c.rel_path);
+      cell.appendChild(img);
+      const tip = document.createElement("div");
+      tip.className = "ntip";
+      tip.textContent = c.rel_path.split("/").pop() +
+        (c.dup_gid != null ? ` (dup #${c.dup_gid})` : "");
+      cell.appendChild(tip);
+      if (c.dup_gid != null) {
+        cell.onclick = () => {
+          state.autoFollow = false;
+          selectGroup(c.dup_gid, false);
+        };
+      }
+    }
+    grid.appendChild(cell);
+  }
+  return grid;
 }
 
 function renderRow(dg, f, dupMd5s) {
   const row = document.createElement("div");
   row.className = "dup-row" + (effectiveMd5(f) && dupMd5s.has(effectiveMd5(f)) ? " md5-dup" : "");
-  row.appendChild(renderNeighborCol(f.neighbors_prev));
 
   const vp = document.createElement("div");
   vp.className = "dup-viewport";
@@ -547,7 +559,7 @@ function renderRow(dg, f, dupMd5s) {
     vp.appendChild(ph);
   }
   row.appendChild(vp);
-  row.appendChild(renderNeighborCol(f.neighbors_next));
+  row.appendChild(renderNeighborGrid(f));
 
   const side = document.createElement("div");
   side.className = "dup-side";
@@ -681,7 +693,46 @@ async function doAction(path, extra) {
   await pollState(true);
 }
 
-async function moveToRepo(file, name) {
+async function loadAllDims(dg) {
+  await Promise.all(dg.files.map(async (f) => {
+    if (f.width != null && f.height != null) return;
+    const src = fileImageLoc(f);
+    if (!src) return;
+    const params = { group: state.currentTab, loc: src.loc, path: src.path };
+    if (src.kind) params.kind = src.kind;
+    try {
+      const info = await api("/api/imageinfo", params);
+      if (info.width && info.height) {
+        f.width = info.width;
+        f.height = info.height;
+      }
+    } catch (e) {}
+  }));
+}
+
+function uniqueMaxWarn(dg, file) {
+  const sizes = dg.files.map((x) => x.size).filter((s) => s != null && s > 0);
+  const maxSize = sizes.length ? Math.max(...sizes) : null;
+  const sizeMaxUnique = maxSize != null &&
+    sizes.filter((s) => s === maxSize).length === 1 && file.size === maxSize;
+  const areas = dg.files.map((x) => (x.width && x.height ? x.width * x.height : 0))
+    .filter((a) => a > 0);
+  const maxArea = areas.length ? Math.max(...areas) : null;
+  const fileArea = file.width && file.height ? file.width * file.height : 0;
+  const areaMaxUnique = maxArea != null &&
+    areas.filter((a) => a === maxArea).length === 1 && fileArea === maxArea;
+  return sizeMaxUnique || areaMaxUnique;
+}
+
+async function moveToRepo(file, name, skipWarn) {
+  if (!skipWarn) {
+    await loadAllDims(state.dupgroup);
+    if (uniqueMaxWarn(state.dupgroup, file)) {
+      const proceed = await showConfirm(
+        "This image has the largest and unique file size or dimensions within the group. Move it to the dup repo anyway?");
+      if (!proceed) return;
+    }
+  }
   const body = {
     group: state.currentTab, ...identity(file),
     repo_name: name || file.rel_path.split("/").pop(),
@@ -697,7 +748,7 @@ async function moveToRepo(file, name) {
       input: conflict,
       cancel: true,
     });
-    if (newName) moveToRepo(file, newName);
+    if (newName) moveToRepo(file, newName, true);
     return;
   }
   if (res.error) {
@@ -730,7 +781,8 @@ function renderCarousel() {
     label.textContent = "";
     return;
   }
-  const candidates = dg.files.filter((f) => fileImageLoc(f));
+  const candidates = dg.files.filter((f) =>
+    ["present", "moved", "replaced"].includes(f.status));
   if (!candidates.length) {
     carouselShow(null);
     label.textContent = "no images";
@@ -840,6 +892,14 @@ for (const button of $("list-tabs").querySelectorAll("button")) {
     state.listMode = button.dataset.mode;
     for (const b of $("list-tabs").querySelectorAll("button"))
       b.classList.toggle("active", b === button);
+    $("completed-tools").classList.toggle("hidden", state.listMode !== "completed");
     renderGroupList();
   };
 }
+
+$("btn-clear-completed").onclick = async () => {
+  if (completedGroups().length === 0) return;
+  if (!(await showConfirm("Clear all completed groups?"))) return;
+  localStorage.removeItem(storageKey("completed"));
+  renderGroupList();
+};

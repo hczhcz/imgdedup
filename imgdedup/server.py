@@ -205,7 +205,6 @@ class Handler(BaseHTTPRequestHandler):
                 "dup_repo": rt.cfg.dup_repo,
                 "keep_no_gap": rt.cfg.keep_no_gap,
                 "min_level": rt.cfg.min_level,
-                "version": rt.version,
             })
         self.send_json({"groups": groups})
 
