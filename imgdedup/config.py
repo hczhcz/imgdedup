@@ -50,23 +50,17 @@ def load_config(path=DEFAULT_CONFIG_PATH):
         raw = json.load(f)
     base_dir = os.path.dirname(os.path.abspath(path))
     groups = []
+    optional = ["exclude_patterns", "czkawka_hash_size", "czkawka_hash_alg",
+                "czkawka_image_filter", "czkawka_similarity_preset", "min_file_size",
+                "min_level", "keep_no_gap", "scan_interval", "czkawka_full_interval"]
     for g in raw.get("groups", []):
         gc = GroupConfig(
             name=g["name"],
             library_root=os.path.abspath(g["library_root"]),
-            exclude_patterns=g.get("exclude_patterns", []),
             dup_repo=os.path.abspath(g["dup_repo"]),
             exact_dup_repo=os.path.abspath(g.get("exact_dup_repo") or g["dup_repo"]),
-            czkawka_hash_size=g.get("czkawka_hash_size", 16),
-            czkawka_hash_alg=g.get("czkawka_hash_alg", "Gradient"),
-            czkawka_image_filter=g.get("czkawka_image_filter", "Nearest"),
-            czkawka_similarity_preset=g.get("czkawka_similarity_preset", "Minimal"),
-            min_file_size=g.get("min_file_size", 1024),
-            min_level=g.get("min_level", "Minimal"),
-            keep_no_gap=g.get("keep_no_gap", False),
             hide_before=parse_hide_before(g.get("hide_before")),
-            scan_interval=g.get("scan_interval", 5.0),
-            czkawka_full_interval=g.get("czkawka_full_interval", 600.0),
+            **{k: g[k] for k in optional if k in g},
         )
         if gc.min_level not in LEVELS:
             raise ValueError(f"invalid min_level: {gc.min_level}")

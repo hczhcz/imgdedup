@@ -138,6 +138,10 @@ function stashToCompleted(dg, hasOps) {
 async function guardLeaveGroup() {
   const dg = state.dupgroup;
   if (!dg || !dg.hasOperations || dg.isCompleted) return true;
+  if (dg.can_complete) {
+    stashToCompleted(dg, false);
+    return true;
+  }
   const present = dg.files.filter(isPresentLike);
   const text = dg.keep_no_gap && !dg.gaps_ok && present.length === 1
     ? "This group leaves a gap in the sequence. Move it to Completed and leave?"
@@ -538,6 +542,21 @@ function renderNeighborGrid(f) {
   return grid;
 }
 
+function fetchImageInfo(src) {
+  const params = { group: state.currentTab, loc: src.loc, path: src.path };
+  if (src.kind) params.kind = src.kind;
+  return api("/api/imageinfo", params).catch(() => null);
+}
+
+function updateDimHighlights(dg) {
+  const area = (x) => isPresentLike(x) ? (x.width || 0) * (x.height || 0) : 0;
+  const maxArea = Math.max(...dg.files.map(area));
+  const els = document.querySelectorAll(".dup-row .dim");
+  dg.files.forEach((x, i) => {
+    if (els[i]) els[i].classList.toggle("max-val", maxArea > 0 && area(x) === maxArea);
+  });
+}
+
 function renderRow(dg, f, dupMd5s) {
   const row = document.createElement("div");
   row.className = "dup-row" + (effectiveMd5(f) && dupMd5s.has(effectiveMd5(f)) ? " md5-dup" : "");
@@ -591,13 +610,13 @@ function renderRow(dg, f, dupMd5s) {
     em.textContent = "exact duplicate (same md5)";
     side.appendChild(em);
   }
-  const maxSize = Math.max(...dg.files.map((x) => x.size || 0));
+  const maxSize = Math.max(...dg.files.map((x) => isPresentLike(x) ? x.size || 0 : 0));
   const mDate = document.createElement("div");
   mDate.className = "meta";
   mDate.textContent = fmtDate(f.mtime);
   side.appendChild(mDate);
   const mSize = document.createElement("div");
-  mSize.className = "meta" + (f.size && f.size === maxSize ? " max-val" : "");
+  mSize.className = "meta" + (isPresentLike(f) && f.size && f.size === maxSize ? " max-val" : "");
   mSize.textContent = fmtSize(f.size);
   side.appendChild(mSize);
   const mDim = document.createElement("div");
@@ -605,23 +624,12 @@ function renderRow(dg, f, dupMd5s) {
   mDim.textContent = "? × ?";
   side.appendChild(mDim);
   if (src) {
-    const infoParams = { group: state.currentTab, loc: src.loc, path: src.path };
-    if (src.kind) infoParams.kind = src.kind;
-    api("/api/imageinfo", infoParams).then((info) => {
-      if (info.width) {
-        f.width = info.width;
-        f.height = info.height;
-        mDim.textContent = `${info.width} × ${info.height}`;
-        const areas = dg.files.map((x) => (x.width || 0) * (x.height || 0));
-        const maxArea = Math.max(...areas);
-        for (const el of document.querySelectorAll(".dup-row .dim"))
-          el.classList.remove("max-val");
-        dg.files.forEach((x, i) => {
-          const el = document.querySelectorAll(".dup-row .dim")[i];
-          if (el && maxArea > 0 && x.width * x.height === maxArea)
-            el.classList.add("max-val");
-        });
-      }
+    fetchImageInfo(src).then((info) => {
+      if (!info || !info.width) return;
+      f.width = info.width;
+      f.height = info.height;
+      mDim.textContent = `${info.width} × ${info.height}`;
+      updateDimHighlights(dg);
     });
   }
 
@@ -698,24 +706,21 @@ async function loadAllDims(dg) {
     if (f.width != null && f.height != null) return;
     const src = fileImageLoc(f);
     if (!src) return;
-    const params = { group: state.currentTab, loc: src.loc, path: src.path };
-    if (src.kind) params.kind = src.kind;
-    try {
-      const info = await api("/api/imageinfo", params);
-      if (info.width && info.height) {
-        f.width = info.width;
-        f.height = info.height;
-      }
-    } catch (e) {}
+    const info = await fetchImageInfo(src);
+    if (info && info.width && info.height) {
+      f.width = info.width;
+      f.height = info.height;
+    }
   }));
 }
 
 function uniqueMaxWarn(dg, file) {
-  const sizes = dg.files.map((x) => x.size).filter((s) => s != null && s > 0);
+  const cmpFiles = dg.files.filter(isPresentLike);
+  const sizes = cmpFiles.map((x) => x.size).filter((s) => s != null && s > 0);
   const maxSize = sizes.length ? Math.max(...sizes) : null;
   const sizeMaxUnique = maxSize != null &&
     sizes.filter((s) => s === maxSize).length === 1 && file.size === maxSize;
-  const areas = dg.files.map((x) => (x.width && x.height ? x.width * x.height : 0))
+  const areas = cmpFiles.map((x) => (x.width && x.height ? x.width * x.height : 0))
     .filter((a) => a > 0);
   const maxArea = areas.length ? Math.max(...areas) : null;
   const fileArea = file.width && file.height ? file.width * file.height : 0;
@@ -772,6 +777,15 @@ function carouselShow(el) {
     img.classList.toggle("front", img === el);
 }
 
+function leaveCurrentGroup() {
+  localStorage.removeItem(storageKey("working"));
+  state.currentGid = null;
+  state.dupgroup = null;
+  state.dupJson = null;
+  updateListHighlight();
+  renderMain();
+}
+
 function renderCarousel() {
   const dg = state.dupgroup;
   const label = $("carousel-label");
@@ -781,8 +795,7 @@ function renderCarousel() {
     label.textContent = "";
     return;
   }
-  const candidates = dg.files.filter((f) =>
-    ["present", "moved", "replaced"].includes(f.status));
+  const candidates = dg.files.filter(isPresentLike);
   if (!candidates.length) {
     carouselShow(null);
     label.textContent = "no images";
@@ -888,8 +901,12 @@ setInterval(() => pollState(false), 1000);
 loadTabs();
 
 for (const button of $("list-tabs").querySelectorAll("button")) {
-  button.onclick = () => {
+  button.onclick = async () => {
+    if (state.listMode === button.dataset.mode) return;
+    if (!(await guardLeaveGroup())) return;
     state.listMode = button.dataset.mode;
+    state.autoFollow = state.listMode === "main";
+    leaveCurrentGroup();
     for (const b of $("list-tabs").querySelectorAll("button"))
       b.classList.toggle("active", b === button);
     $("completed-tools").classList.toggle("hidden", state.listMode !== "completed");

@@ -23,13 +23,14 @@ def init(log_file):
         _logger = logger
 
 
+def _emit(method, event, fields):
+    payload = {"event": event, "ts": time.time(), **fields}
+    method(json.dumps(payload, ensure_ascii=False))
+
+
 def log(event, **fields):
-    payload = {"event": event, "ts": time.time()}
-    payload.update(fields)
-    _logger.info(json.dumps(payload, ensure_ascii=False))
+    _emit(_logger.info, event, fields)
 
 
 def error(event, **fields):
-    payload = {"event": event, "ts": time.time()}
-    payload.update(fields)
-    _logger.error(json.dumps(payload, ensure_ascii=False))
+    _emit(_logger.error, event, fields)

@@ -35,16 +35,8 @@ def _work_dir(cfg, group):
     return d
 
 
-def _full_out(cfg, group):
-    return os.path.join(_work_dir(cfg, group), "full.json")
-
-
-def _incr_out(cfg, group):
-    return os.path.join(_work_dir(cfg, group), "incr.json")
-
-
-def _inner_out(cfg, group):
-    return os.path.join(_work_dir(cfg, group), "inner.json")
+def _out_path(cfg, group, name):
+    return os.path.join(_work_dir(cfg, group), f"{name}.json")
 
 
 def _base_cmd(cfg, group, out_path):
@@ -102,13 +94,7 @@ def _item(raw):
     }
 
 
-def run_image_scan(cfg, group):
-    out_path = _full_out(cfg, group)
-    cmd = _base_cmd(cfg, group, out_path)
-    cmd += ["-d", group.library_root]
-    raw = _run(cfg, group, cmd, out_path, "full")
-    if raw is None:
-        return None
+def _parse_groups(raw):
     result = []
     for g in raw:
         files = [_item(item) for item in g]
@@ -117,12 +103,20 @@ def run_image_scan(cfg, group):
     return result
 
 
+def run_image_scan(cfg, group):
+    out_path = _out_path(cfg, group, "full")
+    cmd = _base_cmd(cfg, group, out_path)
+    cmd += ["-d", group.library_root]
+    raw = _run(cfg, group, cmd, out_path, "full")
+    return None if raw is None else _parse_groups(raw)
+
+
 def run_incremental_scan(cfg, group, main_dirs, ref_dirs):
     result = []
     if not main_dirs:
         return result
     if ref_dirs:
-        out_path = _incr_out(cfg, group)
+        out_path = _out_path(cfg, group, "incr")
         cmd = _base_cmd(cfg, group, out_path)
         for d in main_dirs:
             cmd += ["-d", d]
@@ -140,15 +134,12 @@ def run_incremental_scan(cfg, group, main_dirs, ref_dirs):
                 files.append(_item(item))
             if len(files) >= 2:
                 result.append(files)
-    inner_out = _inner_out(cfg, group)
+    inner_out = _out_path(cfg, group, "inner")
     cmd = _base_cmd(cfg, group, inner_out)
     for d in main_dirs:
         cmd += ["-d", d]
     raw = _run(cfg, group, cmd, inner_out, "incremental-inner")
     if raw is None:
         return None
-    for g in raw:
-        files = [_item(item) for item in g]
-        if len(files) >= 2:
-            result.append(files)
+    result += _parse_groups(raw)
     return result

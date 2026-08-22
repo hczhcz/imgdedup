@@ -106,70 +106,9 @@ class Handler(BaseHTTPRequestHandler):
             return rt.abs_repo(rel, kind)
         return rt.abs_lib(rel)
 
-    def do_GET(self):
+    def handle_request(self, fn):
         try:
-            path, qs = self.parse_path()
-            if path == "/" or path == "/index.html":
-                self.serve_static("index.html")
-            elif path.startswith("/static/"):
-                self.serve_static(path[len("/static/"):])
-            elif path == "/api/groups":
-                self.api_groups()
-            elif path == "/api/state":
-                rt = self.get_runtime(qs)
-                self.send_json(rt.list_snapshot())
-            elif path == "/api/dupgroup":
-                rt = self.get_runtime(qs)
-                gid = int(qs.get("id", ["0"])[0])
-                snap = rt.group_snapshot(gid)
-                if snap is None:
-                    self.send_error_json("not_found", "group not found", 404)
-                else:
-                    self.send_json(snap)
-            elif path == "/api/image":
-                self.api_image(qs, thumb=False)
-            elif path == "/api/thumb":
-                self.api_image(qs, thumb=True)
-            elif path == "/api/imageinfo":
-                self.api_imageinfo(qs)
-            elif path == "/api/file-state":
-                self.api_file_state(qs)
-            else:
-                self.send_error_json("not_found", "not found", 404)
-        except fileops.FileOpError as e:
-            self.send_error_json(e.code, e.message, 400, e.extra)
-        except BrokenPipeError:
-            pass
-        except Exception as e:
-            oplog.error("http_error", path=self.path, error=repr(e))
-            try:
-                self.send_error_json("internal", repr(e), 500)
-            except Exception:
-                pass
-
-    def do_POST(self):
-        try:
-            path, qs = self.parse_path()
-            length = int(self.headers.get("Content-Length", "0"))
-            body = json.loads(self.rfile.read(length) or b"{}")
-            rt = self.get_runtime({"group": [body.get("group")]})
-            if path == "/api/move_to_repo":
-                kind = rt.act_move_to_repo(body["path"], body["md5"], body["repo_name"])
-                self.send_json({"ok": True, "repo_kind": kind})
-            elif path == "/api/restore":
-                rt.act_restore(body["path"], body["md5"], body["repo_name"])
-                self.send_json({"ok": True})
-            elif path == "/api/move":
-                rt.act_move(body["path"], body["md5"], body["target"])
-                self.send_json({"ok": True})
-            elif path == "/api/ignore":
-                rt.act_ignore(body["md5s"])
-                self.send_json({"ok": True})
-            elif path == "/api/unignore":
-                rt.act_unignore(body["md5s"])
-                self.send_json({"ok": True})
-            else:
-                self.send_error_json("not_found", "not found", 404)
+            fn()
         except KeyError as e:
             self.send_error_json("bad_request", f"missing field: {e}", 400)
         except fileops.FileOpError as e:
@@ -182,6 +121,65 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_error_json("internal", repr(e), 500)
             except Exception:
                 pass
+
+    def do_GET(self):
+        self.handle_request(self._get)
+
+    def do_POST(self):
+        self.handle_request(self._post)
+
+    def _get(self):
+        path, qs = self.parse_path()
+        if path == "/" or path == "/index.html":
+            self.serve_static("index.html")
+        elif path.startswith("/static/"):
+            self.serve_static(path[len("/static/"):])
+        elif path == "/api/groups":
+            self.api_groups()
+        elif path == "/api/state":
+            rt = self.get_runtime(qs)
+            self.send_json(rt.list_snapshot())
+        elif path == "/api/dupgroup":
+            rt = self.get_runtime(qs)
+            gid = int(qs.get("id", ["0"])[0])
+            snap = rt.group_snapshot(gid)
+            if snap is None:
+                self.send_error_json("not_found", "group not found", 404)
+            else:
+                self.send_json(snap)
+        elif path == "/api/image":
+            self.api_image(qs, thumb=False)
+        elif path == "/api/thumb":
+            self.api_image(qs, thumb=True)
+        elif path == "/api/imageinfo":
+            self.api_imageinfo(qs)
+        elif path == "/api/file-state":
+            self.api_file_state(qs)
+        else:
+            self.send_error_json("not_found", "not found", 404)
+
+    def _post(self):
+        path, qs = self.parse_path()
+        length = int(self.headers.get("Content-Length", "0"))
+        body = json.loads(self.rfile.read(length) or b"{}")
+        rt = self.get_runtime({"group": [body.get("group")]})
+        if path == "/api/move_to_repo":
+            kind = rt.act_move_to_repo(body["path"], body["md5"], body["repo_name"])
+            self.send_json({"ok": True, "repo_kind": kind})
+        elif path == "/api/restore":
+            rt.act_restore(body["path"], body["md5"], body["repo_name"])
+            self.send_json({"ok": True})
+        elif path == "/api/move":
+            rt.act_move(body["path"], body["md5"], body["target"])
+            self.send_json({"ok": True})
+        elif path == "/api/ignore":
+            rt.act_ignore(body["md5s"])
+            self.send_json({"ok": True})
+        elif path == "/api/unignore":
+            rt.act_unignore(body["md5s"])
+            self.send_json({"ok": True})
+        else:
+            self.send_error_json("not_found", "not found", 404)
 
     def serve_static(self, name):
         safe = os.path.normpath(name)

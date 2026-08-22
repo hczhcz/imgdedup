@@ -1,3 +1,4 @@
+import bisect
 import fnmatch
 import hashlib
 import json
@@ -34,6 +35,7 @@ class GroupRuntime:
         self.repo_md5_cache = {}
         self.czkawka_groups = []
         self.changed_dirs = set()
+        self.action_seq = 0
         self.ignored_sets = set()
         self.state_path = os.path.join(app_cfg.state_dir, f"{group_cfg.name}.json")
         self.stop_event = threading.Event()
@@ -200,7 +202,10 @@ class GroupRuntime:
             if level is None:
                 continue
             if LEVELS.index(level) < self.cfg.min_level_index():
-                continue
+                md5s = [self.get_md5(m, file_index) for m in members]
+                md5s = [m for m in md5s if m is not None]
+                if len(md5s) == len(set(md5s)):
+                    continue
             scanned.append({"members": sorted(members), "level": level})
         return scanned
 
@@ -238,15 +243,9 @@ class GroupRuntime:
         return s is not None and s in self.ignored_sets
 
     def has_exact_pair(self, g):
-        seen = set()
-        for rp in g["files"]:
-            md5 = self.get_md5(rp, self.file_index)
-            if md5 is None:
-                continue
-            if md5 in seen:
-                return True
-            seen.add(md5)
-        return False
+        md5s = [m for m in (self.get_md5(rp, self.file_index) for rp in g["files"])
+                if m is not None]
+        return len(md5s) != len(set(md5s))
 
     def group_snapshot(self, gid):
         with self.lock:
@@ -287,20 +286,15 @@ class GroupRuntime:
                 if base in siblings:
                     idx = siblings.index(base)
                 else:
-                    idx = 0
-                    while idx < len(siblings) and siblings[idx] < base:
-                        idx += 1
-                    siblings = siblings[:idx] + [None] + siblings[idx:]
-                for s in siblings[max(0, idx - 4):idx]:
-                    if s is not None:
-                        rp2 = os.path.join(d, s) if d else s
-                        info["neighbors_prev"].append(
-                            {"rel_path": rp2, "dup_gid": dir_dups.get(s)})
-                for s in siblings[idx + 1:idx + 5]:
-                    if s is not None:
-                        rp2 = os.path.join(d, s) if d else s
-                        info["neighbors_next"].append(
-                            {"rel_path": rp2, "dup_gid": dir_dups.get(s)})
+                    idx = bisect.bisect_left(siblings, base)
+                    siblings.insert(idx, None)
+
+                def neighbor_infos(names):
+                    return [{"rel_path": os.path.join(d, s), "dup_gid": dir_dups.get(s)}
+                            for s in names if s is not None]
+
+                info["neighbors_prev"] = neighbor_infos(siblings[max(0, idx - 4):idx])
+                info["neighbors_next"] = neighbor_infos(siblings[idx + 1:idx + 5])
                 files.append(info)
             level = "Exact" if any(n >= 2 for n in md5_counts.values()) else g["level"]
             return {
@@ -483,8 +477,9 @@ class GroupRuntime:
 
     def _after_action(self, rel_paths=()):
         with self.lock:
+            self.action_seq += 1
             self.changed_dirs |= {self.file_dir(rp) for rp in rel_paths}
-        self._recompute(dict(self.file_index))
+        self._recompute()
         self.czkawka_wakeup.set()
 
     def _relativize(self, raw):
@@ -499,9 +494,10 @@ class GroupRuntime:
                 groups.append(files)
         return groups
 
-    def _recompute(self, file_index):
+    def _recompute(self):
         with self.lock:
             czkawka_groups = list(self.czkawka_groups)
+            file_index = dict(self.file_index)
         scanned = self.merge_groups(czkawka_groups, file_index)
         self.reconcile(scanned)
         self.evict_md5_cache(file_index)
@@ -530,18 +526,12 @@ class GroupRuntime:
         all_dirs = {os.path.dirname(rp) for rp in file_index}
         all_dirs.discard("")
         main = {d for d in changed_dirs if d}
-        expanded = True
-        while expanded:
-            expanded = False
-            for d in list(main):
-                anc = os.path.dirname(d)
-                while anc:
-                    if anc in all_dirs:
-                        if anc not in main:
-                            main.add(anc)
-                            expanded = True
-                        break
-                    anc = os.path.dirname(anc)
+        for d in list(main):
+            anc = os.path.dirname(d)
+            while anc:
+                if anc in all_dirs:
+                    main.add(anc)
+                anc = os.path.dirname(anc)
         main = set(self._minimal_dirs(main))
         ref = {d for d in all_dirs
                if not any(self._is_under(d, m) or self._is_under(m, d) for m in main)}
@@ -551,8 +541,12 @@ class GroupRuntime:
     def scan_loop(self):
         while not self.stop_event.is_set():
             try:
+                with self.lock:
+                    seq = self.action_seq
                 file_index = self.walk_files()
                 with self.lock:
+                    if self.action_seq != seq:
+                        continue
                     prev = self.file_index
                     self.file_index = file_index
                 if not self.first_scan_done.is_set():
@@ -564,7 +558,7 @@ class GroupRuntime:
                     if added:
                         with self.lock:
                             self.changed_dirs |= {self.file_dir(rp) for rp in added}
-                    self._recompute(file_index)
+                    self._recompute()
                     self.czkawka_wakeup.set()
             except Exception as e:
                 oplog.error("scan_loop_error", group=self.cfg.name, error=str(e))
@@ -589,7 +583,7 @@ class GroupRuntime:
                         groups = self._relativize(raw)
                         with self.lock:
                             self.czkawka_groups = groups
-                        self._recompute(file_index)
+                        self._recompute()
                         oplog.log("czkawka_full_done", group=self.cfg.name,
                                   groups=len(groups))
                 elif changed_dirs:
@@ -602,7 +596,7 @@ class GroupRuntime:
                             self._merge_czkawka_results(groups)
                             with self.lock:
                                 self.changed_dirs -= changed_dirs
-                            self._recompute(file_index)
+                            self._recompute()
                             oplog.log("czkawka_incremental_done", group=self.cfg.name,
                                       dirs=len(main_dirs), groups=len(groups))
                     else:
