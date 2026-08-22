@@ -51,6 +51,12 @@ async function apiPost(path, body) {
   return resp.json();
 }
 
+async function alertIfError(res) {
+  if (!res.error) return false;
+  await showAlert(`${res.error}: ${res.message}`);
+  return true;
+}
+
 function fmtSize(n) {
   if (n == null) return "?";
   if (n < 1024) return n + " B";
@@ -430,16 +436,17 @@ function applyViewAll() {
   document.querySelectorAll(".sync-img").forEach(applyView);
 }
 
-function applyView(img) {
-  const vp = img.parentElement;
+function fitTransform(img, vp, zoom, px, py) {
   if (!img.naturalWidth) return;
   const vw = vp.clientWidth, vh = vp.clientHeight;
-  const s0 = Math.min(vw / img.naturalWidth, vh / img.naturalHeight);
-  const s = s0 * state.view.z;
+  const s = Math.min(vw / img.naturalWidth, vh / img.naturalHeight) * zoom;
   const cx = (vw - img.naturalWidth * s) / 2;
   const cy = (vh - img.naturalHeight * s) / 2;
-  img.style.transform =
-    `translate(${cx + state.view.px}px, ${cy + state.view.py}px) scale(${s})`;
+  img.style.transform = `translate(${cx + px}px, ${cy + py}px) scale(${s})`;
+}
+
+function applyView(img) {
+  fitTransform(img, img.parentElement, state.view.z, state.view.px, state.view.py);
 }
 
 let dragState = null;
@@ -687,15 +694,16 @@ function renderRow(dg, f, dupMd5s) {
 async function doAction(path, extra) {
   const body = { group: state.currentTab, ...extra };
   const res = await apiPost(path, body);
-  if (res.error) {
-    await showAlert(`${res.error}: ${res.message}`);
-    return;
-  }
-  state.dupgroup.hasOperations = true;
+  if (await alertIfError(res)) return;
   if (path === "/api/restore") {
     const file = state.dupgroup.files.find((f) => fileKey(f) === `${extra.path}\0${extra.md5}`);
     if (file) file.repo_path = null;
   }
+  await afterOperation();
+}
+
+async function afterOperation() {
+  state.dupgroup.hasOperations = true;
   await refreshWorkingFiles();
   state.listJson = null;
   await pollState(true);
@@ -756,16 +764,10 @@ async function moveToRepo(file, name, skipWarn) {
     if (newName) moveToRepo(file, newName, true);
     return;
   }
-  if (res.error) {
-    await showAlert(`${res.error}: ${res.message}`);
-    return;
-  }
+  if (await alertIfError(res)) return;
   file.repo_path = body.repo_name;
   file.repo_kind = res.repo_kind;
-  state.dupgroup.hasOperations = true;
-  await refreshWorkingFiles();
-  state.listJson = null;
-  await pollState(true);
+  await afterOperation();
 }
 
 function carouselImgs() {
@@ -777,11 +779,12 @@ function carouselShow(el) {
     img.classList.toggle("front", img === el);
 }
 
-function leaveCurrentGroup() {
+function leaveCurrentGroup(follow) {
   localStorage.removeItem(storageKey("working"));
   state.currentGid = null;
   state.dupgroup = null;
   state.dupJson = null;
+  state.autoFollow = follow;
   updateListHighlight();
   renderMain();
 }
@@ -820,16 +823,9 @@ function renderCarousel() {
 }
 
 function applyCarouselView(img) {
-  const targets = img ? [img] : carouselImgs();
   const vp = $("carousel-view");
-  for (const t of targets) {
-    if (!t.naturalWidth) continue;
-    const vw = vp.clientWidth, vh = vp.clientHeight;
-    const s = Math.min(vw / t.naturalWidth, vh / t.naturalHeight);
-    const cx = (vw - t.naturalWidth * s) / 2;
-    const cy = (vh - t.naturalHeight * s) / 2;
-    t.style.transform = `translate(${cx}px, ${cy}px) scale(${s})`;
-  }
+  for (const t of (img ? [img] : carouselImgs()))
+    fitTransform(t, vp, 1, 0, 0);
 }
 
 $("btn-ignore").onclick = async () => {
@@ -838,14 +834,8 @@ $("btn-ignore").onclick = async () => {
   const md5s = [...new Set(dg.files.filter((f) => isPresentLike(f) && effectiveMd5(f)).map(effectiveMd5))];
   if (!md5s.length) return;
   const res = await apiPost("/api/ignore", { group: state.currentTab, md5s });
-  if (res.error) {
-    await showAlert(`${res.error}: ${res.message}`);
-    return;
-  }
-  localStorage.removeItem(storageKey("working"));
-  state.currentGid = null;
-  state.dupgroup = null;
-  state.autoFollow = true;
+  if (await alertIfError(res)) return;
+  leaveCurrentGroup(true);
   state.listJson = null;
   await pollState(true);
 };
@@ -857,10 +847,7 @@ $("btn-unignore").onclick = async () => {
     group: state.currentTab,
     md5s: g.ignored_md5s,
   });
-  if (res.error) {
-    await showAlert(`${res.error}: ${res.message}`);
-    return;
-  }
+  if (await alertIfError(res)) return;
   state.listJson = null;
   await pollState(true);
 };
@@ -872,13 +859,11 @@ $("btn-complete").onclick = async () => {
   const idx = state.groups.findIndex((g) => g.id === dg.id);
   const prev = state.groups.slice(0, idx < 0 ? state.groups.length : idx)
     .reverse().find((g) => g.id !== dg.id);
-  state.autoFollow = false;
   if (prev) {
+    state.autoFollow = false;
     await selectGroup(prev.id, true);
   } else {
-    state.currentGid = null;
-    state.dupgroup = null;
-    renderMain();
+    leaveCurrentGroup(false);
   }
   state.listJson = null;
   await pollState(true);
@@ -905,8 +890,7 @@ for (const button of $("list-tabs").querySelectorAll("button")) {
     if (state.listMode === button.dataset.mode) return;
     if (!(await guardLeaveGroup())) return;
     state.listMode = button.dataset.mode;
-    state.autoFollow = state.listMode === "main";
-    leaveCurrentGroup();
+    leaveCurrentGroup(state.listMode === "main");
     for (const b of $("list-tabs").querySelectorAll("button"))
       b.classList.toggle("active", b === button);
     $("completed-tools").classList.toggle("hidden", state.listMode !== "completed");

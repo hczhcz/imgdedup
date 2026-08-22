@@ -32,7 +32,6 @@ class GroupRuntime:
         self.groups = {}
         self.file_index = {}
         self.md5_cache = {}
-        self.repo_md5_cache = {}
         self.czkawka_groups = []
         self.changed_dirs = set()
         self.action_seq = 0
@@ -69,21 +68,18 @@ class GroupRuntime:
     def file_dir(self, rel_path):
         return os.path.dirname(rel_path)
 
-    def abs_lib(self, rel_path):
-        p = os.path.abspath(os.path.join(self.cfg.library_root, rel_path))
-        if not (p == self.cfg.library_root or p.startswith(self.cfg.library_root.rstrip(os.sep) + os.sep)):
-            raise fileops.FileOpError("bad_path", f"path escapes library: {rel_path}")
+    def _abs_under(self, root, rel_path, what):
+        p = os.path.abspath(os.path.join(root, rel_path))
+        if not self._is_under(p, root.rstrip(os.sep)):
+            raise fileops.FileOpError("bad_path", f"path escapes {what}: {rel_path}")
         return p
 
-    def repo_root(self, kind):
-        return self.cfg.exact_dup_repo if kind == "exact" else self.cfg.dup_repo
+    def abs_lib(self, rel_path):
+        return self._abs_under(self.cfg.library_root, rel_path, "library")
 
     def abs_repo(self, repo_name, kind="fuzzy"):
-        root = self.repo_root(kind)
-        p = os.path.abspath(os.path.join(root, repo_name))
-        if not (p == root or p.startswith(root.rstrip(os.sep) + os.sep)):
-            raise fileops.FileOpError("bad_path", f"path escapes repo: {repo_name}")
-        return p
+        root = self.cfg.exact_dup_repo if kind == "exact" else self.cfg.dup_repo
+        return self._abs_under(root, repo_name, "repo")
 
     def excluded(self, abs_path):
         for pat in self.cfg.exclude_patterns:
@@ -117,22 +113,15 @@ class GroupRuntime:
     def get_md5(self, rp, file_index):
         if rp not in file_index:
             return None
-        size, mtime, _ = file_index[rp]
-        key = (rp, size, mtime)
-        md5 = self.md5_cache.get(key)
-        if md5 is None:
-            try:
-                md5 = file_md5(self.abs_lib(rp))
-            except OSError:
-                return None
-            self.md5_cache[key] = md5
-        return md5
+        return self.get_path_md5(self.abs_lib(rp))
 
     def evict_md5_cache(self, file_index):
-        stale = [k for k in self.md5_cache
-                 if k[0] not in file_index or file_index[k[0]][:2] != (k[1], k[2])]
-        for k in stale:
-            del self.md5_cache[k]
+        lib = {self.abs_lib(rp) for rp in file_index}
+        root = self.cfg.library_root.rstrip(os.sep)
+        stale = [p for p in self.md5_cache
+                 if self._is_under(p, root) and p not in lib]
+        for p in stale:
+            del self.md5_cache[p]
 
     def get_path_md5(self, path):
         try:
@@ -140,14 +129,14 @@ class GroupRuntime:
         except OSError:
             return None
         key = (st.st_size, st.st_mtime)
-        entry = self.repo_md5_cache.get(path)
+        entry = self.md5_cache.get(path)
         if entry is not None and entry[0] == key:
             return entry[1]
         try:
             md5 = file_md5(path)
         except OSError:
             return None
-        self.repo_md5_cache[path] = (key, md5)
+        self.md5_cache[path] = (key, md5)
         return md5
 
     def merge_groups(self, czkawka_groups, file_index):
@@ -236,11 +225,9 @@ class GroupRuntime:
             md5s.add(md5)
         return frozenset(md5s) if md5s else None
 
-    def is_ignored(self, g):
-        if not self.ignored_sets:
-            return False
-        s = self.group_md5_set(g)
-        return s is not None and s in self.ignored_sets
+    def ignored_match(self, g):
+        s = self.group_md5_set(g) if self.ignored_sets else None
+        return s if s in self.ignored_sets else None
 
     def has_exact_pair(self, g):
         md5s = [m for m in (self.get_md5(rp, self.file_index) for rp in g["files"])
@@ -283,24 +270,21 @@ class GroupRuntime:
                 dir_dups = dup_dirs.get(d, {})
                 siblings = self._dir_siblings(d)
                 base = os.path.basename(rp)
-                if base in siblings:
-                    idx = siblings.index(base)
-                else:
-                    idx = bisect.bisect_left(siblings, base)
-                    siblings.insert(idx, None)
+                names = [s for s in siblings if s != base]
+                idx = bisect.bisect_left(names, base)
 
-                def neighbor_infos(names):
+                def neighbor_infos(part):
                     return [{"rel_path": os.path.join(d, s), "dup_gid": dir_dups.get(s)}
-                            for s in names if s is not None]
+                            for s in part]
 
-                info["neighbors_prev"] = neighbor_infos(siblings[max(0, idx - 4):idx])
-                info["neighbors_next"] = neighbor_infos(siblings[idx + 1:idx + 5])
+                info["neighbors_prev"] = neighbor_infos(names[max(0, idx - 4):idx])
+                info["neighbors_next"] = neighbor_infos(names[idx:idx + 4])
                 files.append(info)
             level = "Exact" if any(n >= 2 for n in md5_counts.values()) else g["level"]
             return {
                 "id": gid,
                 "level": level,
-                "ignored": self.is_ignored(g),
+                "ignored": self.ignored_match(g) is not None,
                 "keep_no_gap": self.cfg.keep_no_gap,
                 "files": files,
             }
@@ -330,8 +314,7 @@ class GroupRuntime:
             for gid in sorted(self.groups.keys()):
                 g = self.groups[gid]
                 exact = self.has_exact_pair(g)
-                group_md5s = self.group_md5_set(g) if self.ignored_sets else None
-                ignored_set = group_md5s if group_md5s in self.ignored_sets else None
+                ignored_set = self.ignored_match(g)
                 if ignored_set is not None:
                     item = self._list_item(gid, g, exact)
                     item["ignored_md5s"] = sorted(ignored_set)

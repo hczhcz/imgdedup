@@ -97,7 +97,10 @@ def _item(raw):
 def _parse_groups(raw):
     result = []
     for g in raw:
-        files = [_item(item) for item in g]
+        files = []
+        for entry in g:
+            for item in (entry if isinstance(entry, list) else [entry]):
+                files.append(_item(item))
         if len(files) >= 2:
             result.append(files)
     return result
@@ -125,15 +128,7 @@ def run_incremental_scan(cfg, group, main_dirs, ref_dirs):
         raw = _run(cfg, group, cmd, out_path, "incremental-ref")
         if raw is None:
             return None
-        for g in raw:
-            if len(g) < 2:
-                continue
-            files = [_item(g[0])]
-            others = g[1] if isinstance(g[1], list) else [g[1]]
-            for item in others:
-                files.append(_item(item))
-            if len(files) >= 2:
-                result.append(files)
+        result += _parse_groups(raw)
     inner_out = _out_path(cfg, group, "inner")
     cmd = _base_cmd(cfg, group, inner_out)
     for d in main_dirs:
