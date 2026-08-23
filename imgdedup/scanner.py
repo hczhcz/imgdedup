@@ -1,6 +1,7 @@
 import bisect
 import fnmatch
 import hashlib
+import re
 import json
 import os
 import threading
@@ -34,6 +35,9 @@ class GroupRuntime:
         self.md5_cache = {}
         self.czkawka_groups = []
         self.changed_dirs = set()
+        self.state_version = 0
+        self._list_cache = None
+        self._exclude_res = [re.compile(fnmatch.translate(p)) for p in group_cfg.exclude_patterns]
         self.action_seq = 0
         self.ignored_sets = set()
         self.state_path = os.path.join(app_cfg.state_dir, f"{group_cfg.name}.json")
@@ -82,32 +86,45 @@ class GroupRuntime:
         return self._abs_under(root, repo_name, "repo")
 
     def excluded(self, abs_path):
-        for pat in self.cfg.exclude_patterns:
-            if fnmatch.fnmatch(abs_path, pat):
+        for rx in self._exclude_res:
+            if rx.match(abs_path):
                 return True
         return False
 
     def walk_files(self):
         result = {}
-        root = self.cfg.library_root
-        repos = [self.cfg.dup_repo.rstrip(os.sep), self.cfg.exact_dup_repo.rstrip(os.sep)]
-        for dirpath, dirnames, filenames in os.walk(root):
-            ad = os.path.abspath(dirpath)
-            if any(ad == r or ad.startswith(r + os.sep) for r in repos):
-                dirnames[:] = []
+        root = os.path.abspath(self.cfg.library_root)
+        repos = {self.cfg.dup_repo.rstrip(os.sep), self.cfg.exact_dup_repo.rstrip(os.sep)}
+        min_size = self.cfg.min_file_size
+        root_prefix_len = len(root.rstrip(os.sep)) + 1
+        stack = [root]
+        while stack:
+            d = stack.pop()
+            try:
+                entries = os.scandir(d)
+            except OSError:
                 continue
-            dirnames[:] = [d for d in sorted(dirnames) if not self.excluded(os.path.join(dirpath, d))]
-            for fn in sorted(filenames):
-                ap = os.path.join(dirpath, fn)
-                if not is_image(ap) or self.excluded(ap):
-                    continue
-                try:
-                    st = os.stat(ap)
-                except OSError:
-                    continue
-                if st.st_size < self.cfg.min_file_size:
-                    continue
-                result[self.rel(ap)] = (st.st_size, st.st_mtime, st.st_ctime)
+            with entries:
+                for e in entries:
+                    ap = e.path
+                    try:
+                        if e.is_dir(follow_symlinks=False):
+                            if ap not in repos and not self.excluded(ap):
+                                stack.append(ap)
+                            continue
+                        if not e.is_file(follow_symlinks=False):
+                            continue
+                    except OSError:
+                        continue
+                    if not is_image(e.name) or self.excluded(ap):
+                        continue
+                    try:
+                        st = e.stat()
+                    except OSError:
+                        continue
+                    if st.st_size < min_size:
+                        continue
+                    result[ap[root_prefix_len:]] = (st.st_size, st.st_mtime, st.st_ctime)
         return result
 
     def get_md5(self, rp, file_index):
@@ -214,7 +231,9 @@ class GroupRuntime:
                     "level": sg["level"],
                     "created_at": old["created_at"] if old else time.time(),
                 }
-            self.groups = groups
+            if groups != self.groups:
+                self.groups = groups
+                self._bump_version()
 
     def group_md5_set(self, g):
         md5s = set()
@@ -306,8 +325,14 @@ class GroupRuntime:
                   for rp in g["files"] if rp in self.file_index]
         return bool(mtimes) and all(m < self.cfg.hide_before for m in mtimes)
 
+    def _bump_version(self):
+        self.state_version += 1
+        self._list_cache = None
+
     def list_snapshot(self):
         with self.lock:
+            if self._list_cache is not None and self._list_cache[0] == self.state_version:
+                return self._list_cache[1]
             items = []
             ignored = []
             old = []
@@ -328,7 +353,9 @@ class GroupRuntime:
             items.sort(key=key)
             ignored.sort(key=key)
             old.sort(key=key)
-            return {"groups": items, "ignored": ignored, "old": old}
+            snap = {"groups": items, "ignored": ignored, "old": old}
+            self._list_cache = (self.state_version, snap)
+            return snap
 
     def _list_item(self, gid, g, exact=False):
         files = []
@@ -446,6 +473,7 @@ class GroupRuntime:
             if not s:
                 raise fileops.FileOpError("bad_request", "empty md5 set")
             self.ignored_sets.add(s)
+            self._bump_version()
             oplog.log("action_ignore", group=self.cfg.name, md5s=sorted(s))
             self.save_state()
 
@@ -455,12 +483,14 @@ class GroupRuntime:
             if s not in self.ignored_sets:
                 raise fileops.FileOpError("not_ignored", "group is not ignored")
             self.ignored_sets.discard(s)
+            self._bump_version()
             oplog.log("action_unignore", group=self.cfg.name, md5s=sorted(s))
             self.save_state()
 
     def _after_action(self, rel_paths=()):
         with self.lock:
             self.action_seq += 1
+            self._bump_version()
             self.changed_dirs |= {self.file_dir(rp) for rp in rel_paths}
         self._recompute()
         self.czkawka_wakeup.set()
@@ -531,7 +561,9 @@ class GroupRuntime:
                     if self.action_seq != seq:
                         continue
                     prev = self.file_index
-                    self.file_index = file_index
+                    if file_index != prev:
+                        self.file_index = file_index
+                        self._bump_version()
                 if not self.first_scan_done.is_set():
                     self.first_scan_done.set()
                     self.czkawka_wakeup.set()
