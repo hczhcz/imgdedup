@@ -242,20 +242,20 @@ class Handler(BaseHTTPRequestHandler):
         if rel is None:
             raise fileops.FileOpError("bad_request", "missing path")
         lib = rt.abs_lib(rel)
-        lib_size = lib_mtime = None
+        lib_size = lib_mtime = lib_ctime = None
         try:
             st = os.stat(lib)
-            lib_size, lib_mtime = st.st_size, st.st_mtime
+            lib_size, lib_mtime, lib_ctime = st.st_size, st.st_mtime, st.st_ctime
         except OSError:
             pass
         with rt.lock:
             lib_md5 = rt.get_path_md5(lib) if lib_size is not None else None
             matches = rt.repo_matches(repo_name, md5) if repo_name else []
-        repo_size = repo_mtime = None
+        repo_size = repo_mtime = repo_ctime = None
         if len(matches) == 1:
             try:
                 st = os.stat(matches[0][1])
-                repo_size, repo_mtime = st.st_size, st.st_mtime
+                repo_size, repo_mtime, repo_ctime = st.st_size, st.st_mtime, st.st_ctime
             except OSError:
                 pass
         self.send_json({
@@ -264,8 +264,8 @@ class Handler(BaseHTTPRequestHandler):
             "lib_md5": lib_md5,
             "in_repo": len(matches) == 1,
             "repo_kind": matches[0][0] if len(matches) == 1 else None,
-            "lib_size": lib_size, "lib_mtime": lib_mtime,
-            "repo_size": repo_size, "repo_mtime": repo_mtime,
+            "lib_size": lib_size, "lib_mtime": lib_mtime, "lib_ctime": lib_ctime,
+            "repo_size": repo_size, "repo_mtime": repo_mtime, "repo_ctime": repo_ctime,
         })
 
 

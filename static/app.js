@@ -36,6 +36,7 @@ function persistGroup(dg) {
       is_last: f.is_last,
       size: f.size,
       mtime: f.mtime,
+      ctime: f.ctime,
       repo_path: f.repo_path || null,
       repo_kind: f.repo_kind || null,
       neighbors_prev: f.neighbors_prev || [],
@@ -376,8 +377,8 @@ async function refreshWorkingFiles() {
       lib_md5: info.lib_md5,
       occupied: info.path_occupied,
       in_repo: info.in_repo,
-      lib_size: info.lib_size, lib_mtime: info.lib_mtime,
-      repo_size: info.repo_size, repo_mtime: info.repo_mtime,
+      lib_size: info.lib_size, lib_mtime: info.lib_mtime, lib_ctime: info.lib_ctime,
+      repo_size: info.repo_size, repo_mtime: info.repo_mtime, repo_ctime: info.repo_ctime,
     };
   }));
   for (const f of dg.files) {
@@ -397,9 +398,11 @@ async function refreshWorkingFiles() {
     if (f.status === "in_repo") {
       f.size = s.repo_size;
       f.mtime = s.repo_mtime;
+      f.ctime = s.repo_ctime;
     } else {
       f.size = s.lib_size;
       f.mtime = s.lib_mtime;
+      f.ctime = s.lib_ctime;
     }
   }
   updateWorkingRules(dg);
@@ -413,8 +416,12 @@ function isPresentLike(f) {
 function updateWorkingRules(dg) {
   const present = dg.files.filter(isPresentLike);
   const slotFilled = (f) => ["present", "replaced", "moved"].includes(f.status);
+  const recent = (f) => {
+    const t = Math.max(f.mtime || 0, f.ctime || 0);
+    return t > 0 && Date.now() / 1000 - t <= 86400;
+  };
   const gapsOk = !dg.keep_no_gap || dg.files.every((f) =>
-    slotFilled(f) || f.is_last);
+    slotFilled(f) || (f.is_last && recent(f)));
   dg.gaps_ok = gapsOk;
   dg.can_complete = present.length === 1 && gapsOk;
   dg.can_ignore = present.length >= 2;

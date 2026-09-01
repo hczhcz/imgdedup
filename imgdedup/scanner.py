@@ -270,7 +270,7 @@ class GroupRuntime:
                     "md5": self.get_md5(rp, self.file_index),
                     "status": "present" if rp in self.file_index else "missing",
                     "is_last": rp == last,
-                    "size": None, "mtime": None,
+                    "size": None, "mtime": None, "ctime": None,
                     "neighbors_prev": [], "neighbors_next": [],
                 }
                 if info["md5"] is not None:
@@ -281,6 +281,7 @@ class GroupRuntime:
                         st = os.stat(ap)
                         info["size"] = st.st_size
                         info["mtime"] = st.st_mtime
+                        info["ctime"] = st.st_ctime
                     except OSError:
                         pass
                 d = os.path.dirname(rp)
