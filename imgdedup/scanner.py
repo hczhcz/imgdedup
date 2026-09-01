@@ -7,7 +7,7 @@ import os
 import threading
 import time
 
-from . import czkawka, fileops, oplog
+from . import czkawka, fileops, oplog, watcher
 from .config import LEVELS
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif", ".avif", ".jxl", ".heic"}
@@ -44,6 +44,7 @@ class GroupRuntime:
         self.stop_event = threading.Event()
         self.czkawka_wakeup = threading.Event()
         self.first_scan_done = threading.Event()
+        self.watcher = None
         self.load_state()
 
     def load_state(self):
@@ -551,33 +552,72 @@ class GroupRuntime:
         ref = set(self._minimal_dirs(ref))
         return [self.abs_lib(d) for d in sorted(main)], [self.abs_lib(d) for d in sorted(ref)]
 
+    def _apply_walk(self, file_index, seq):
+        with self.lock:
+            if self.action_seq != seq:
+                return
+            prev = self.file_index
+            if file_index != prev:
+                self.file_index = file_index
+                self._bump_version()
+        if not self.first_scan_done.is_set():
+            self.first_scan_done.set()
+            self.czkawka_wakeup.set()
+        added = [rp for rp, v in file_index.items() if prev.get(rp) != v]
+        removed = [rp for rp in prev if rp not in file_index]
+        if added or removed:
+            if added:
+                with self.lock:
+                    self.changed_dirs |= {self.file_dir(rp) for rp in added}
+            self._recompute()
+            self.czkawka_wakeup.set()
+
     def scan_loop(self):
+        debounce = 5.0
         while not self.stop_event.is_set():
+            w = None
             try:
+                w = watcher.Watcher(self.cfg.library_root, ignored=self.excluded)
+                try:
+                    w.start()
+                except OSError as e:
+                    oplog.error("watcher_start_failed", group=self.cfg.name, error=str(e))
+                    self.stop_event.wait(debounce)
+                    continue
                 with self.lock:
+                    self.watcher = w
                     seq = self.action_seq
-                file_index = self.walk_files()
-                with self.lock:
-                    if self.action_seq != seq:
+                self._apply_walk(self.walk_files(), seq)
+                dirty = set()
+                rescan = False
+                while not self.stop_event.is_set():
+                    if not w.readable(debounce):
+                        if dirty or rescan:
+                            with self.lock:
+                                seq = self.action_seq
+                            file_index = self.walk_files()
+                            self._apply_walk(file_index, seq)
+                            dirty = set()
+                            rescan = False
                         continue
-                    prev = self.file_index
-                    if file_index != prev:
-                        self.file_index = file_index
-                        self._bump_version()
-                if not self.first_scan_done.is_set():
-                    self.first_scan_done.set()
-                    self.czkawka_wakeup.set()
-                added = [rp for rp, v in file_index.items() if prev.get(rp) != v]
-                removed = [rp for rp in prev if rp not in file_index]
-                if added or removed:
-                    if added:
-                        with self.lock:
-                            self.changed_dirs |= {self.file_dir(rp) for rp in added}
-                    self._recompute()
-                    self.czkawka_wakeup.set()
+                    events = w.read()
+                    r, d = watcher.reduce_events(w, events)
+                    rescan = rescan or r
+                    dirty |= d
+                    if rescan:
+                        break
             except Exception as e:
                 oplog.error("scan_loop_error", group=self.cfg.name, error=str(e))
-            self.stop_event.wait(self.cfg.scan_interval)
+            finally:
+                if w is not None:
+                    try:
+                        w.close()
+                    except OSError:
+                        pass
+                    with self.lock:
+                        if self.watcher is w:
+                            self.watcher = None
+            self.stop_event.wait(debounce)
 
     def czkawka_loop(self):
         last_full_started = 0.0
@@ -632,3 +672,10 @@ class GroupRuntime:
     def stop(self):
         self.stop_event.set()
         self.czkawka_wakeup.set()
+        with self.lock:
+            w = self.watcher
+        if w is not None:
+            try:
+                w.close()
+            except OSError:
+                pass

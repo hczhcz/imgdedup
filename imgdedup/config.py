@@ -23,7 +23,6 @@ class GroupConfig:
     min_level: str = "Minimal"
     keep_no_gap: bool = False
     hide_before: float = None
-    scan_interval: float = 5.0
     czkawka_full_interval: float = 600.0
 
     def min_level_index(self):
@@ -52,7 +51,7 @@ def load_config(path=DEFAULT_CONFIG_PATH):
     groups = []
     optional = ["exclude_patterns", "czkawka_hash_size", "czkawka_hash_alg",
                 "czkawka_image_filter", "czkawka_similarity_preset", "min_file_size",
-                "min_level", "keep_no_gap", "scan_interval", "czkawka_full_interval"]
+                "min_level", "keep_no_gap", "czkawka_full_interval"]
     for g in raw.get("groups", []):
         gc = GroupConfig(
             name=g["name"],
