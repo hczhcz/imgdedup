@@ -577,7 +577,9 @@ class GroupRuntime:
         while not self.stop_event.is_set():
             w = None
             try:
-                w = watcher.Watcher(self.cfg.library_root, ignored=self.excluded)
+                repos = {self.cfg.dup_repo.rstrip(os.sep), self.cfg.exact_dup_repo.rstrip(os.sep)}
+                w = watcher.Watcher(self.cfg.library_root,
+                                    ignored=lambda p: p in repos or self.excluded(p))
                 try:
                     w.start()
                 except OSError as e:
@@ -588,22 +590,19 @@ class GroupRuntime:
                     self.watcher = w
                     seq = self.action_seq
                 self._apply_walk(self.walk_files(), seq)
-                dirty = set()
-                rescan = False
+                dirty_since = None
                 while not self.stop_event.is_set():
-                    if not w.readable(debounce):
-                        if dirty or rescan:
-                            with self.lock:
-                                seq = self.action_seq
-                            file_index = self.walk_files()
-                            self._apply_walk(file_index, seq)
-                            dirty = set()
-                            rescan = False
+                    quiet = not w.readable(0.5 if dirty_since else debounce)
+                    if dirty_since and (quiet or time.time() - dirty_since >= debounce):
+                        with self.lock:
+                            seq = self.action_seq
+                        self._apply_walk(self.walk_files(), seq)
+                        dirty_since = None
+                    if quiet:
                         continue
-                    events = w.read()
-                    r, d = watcher.reduce_events(w, events)
-                    rescan = rescan or r
-                    dirty |= d
+                    rescan, d = watcher.reduce_events(w.read())
+                    if d and dirty_since is None:
+                        dirty_since = time.time()
                     if rescan:
                         break
             except Exception as e:
