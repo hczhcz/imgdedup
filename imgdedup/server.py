@@ -1,4 +1,3 @@
-import hashlib
 import io
 import json
 import mimetypes
@@ -23,7 +22,7 @@ def make_thumbnail(abs_path):
         st = os.stat(abs_path)
     except OSError:
         return None
-    key = hashlib.md5(f"{abs_path}:{st.st_mtime}:{st.st_size}".encode()).hexdigest()
+    key = (abs_path, st.st_mtime, st.st_size)
     with _thumb_lock:
         if key in _thumb_cache:
             return _thumb_cache[key]
@@ -159,27 +158,24 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error_json("not_found", "not found", 404)
 
     def _post(self):
-        path, qs = self.parse_path()
+        path, _ = self.parse_path()
         length = int(self.headers.get("Content-Length", "0"))
         body = json.loads(self.rfile.read(length) or b"{}")
         rt = self.get_runtime({"group": [body.get("group")]})
-        if path == "/api/move_to_repo":
-            kind = rt.act_move_to_repo(body["path"], body["md5"], body["repo_name"])
-            self.send_json({"ok": True, "repo_kind": kind})
-        elif path == "/api/restore":
-            rt.act_restore(body["path"], body["md5"], body["repo_name"])
-            self.send_json({"ok": True})
-        elif path == "/api/move":
-            rt.act_move(body["path"], body["md5"], body["target"])
-            self.send_json({"ok": True})
-        elif path == "/api/ignore":
-            rt.act_ignore(body["md5s"])
-            self.send_json({"ok": True})
-        elif path == "/api/unignore":
-            rt.act_unignore(body["md5s"])
-            self.send_json({"ok": True})
-        else:
+        actions = {
+            "/api/move_to_repo": lambda: {"repo_kind": rt.act_move_to_repo(
+                body["path"], body["md5"], body["repo_name"])},
+            "/api/restore": lambda: rt.act_restore(body["path"], body["md5"], body["repo_name"]),
+            "/api/move": lambda: rt.act_move(body["path"], body["md5"], body["target"]),
+            "/api/ignore": lambda: rt.act_ignore(body["md5s"]),
+            "/api/unignore": lambda: rt.act_unignore(body["md5s"]),
+        }
+        action = actions.get(path)
+        if action is None:
             self.send_error_json("not_found", "not found", 404)
+            return
+        result = action()
+        self.send_json({"ok": True, **(result or {})})
 
     def serve_static(self, name):
         safe = os.path.normpath(name)

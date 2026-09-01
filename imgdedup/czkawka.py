@@ -118,12 +118,10 @@ def _seed_cache(cfg, group):
 
 def _merge_cache(master, active, master_entries):
     new_entries = _parse_cache_bin(active)
-    if not new_entries and not master_entries:
+    if not new_entries:
         return
-    before = len(master_entries)
     master_entries.update(new_entries)
-    if len(master_entries) != before or new_entries:
-        _write_cache_bin(master, master_entries)
+    _write_cache_bin(master, master_entries)
 
 
 def _run(cfg, group, cmd, out_path, label):
@@ -176,12 +174,19 @@ def _parse_groups(raw):
     return result
 
 
-def run_image_scan(cfg, group):
-    out_path = _out_path(cfg, group, "full")
+def _scan(cfg, group, name, label, dirs, ref_dirs=()):
+    out_path = _out_path(cfg, group, name)
     cmd = _base_cmd(cfg, group, out_path)
-    cmd += ["-d", group.library_root]
-    raw = _run(cfg, group, cmd, out_path, "full")
+    for d in dirs:
+        cmd += ["-d", d]
+    for r in ref_dirs:
+        cmd += ["-r", r]
+    raw = _run(cfg, group, cmd, out_path, label)
     return None if raw is None else _parse_groups(raw)
+
+
+def run_image_scan(cfg, group):
+    return _scan(cfg, group, "full", "full", [group.library_root])
 
 
 def run_incremental_scan(cfg, group, main_dirs, ref_dirs):
@@ -189,22 +194,11 @@ def run_incremental_scan(cfg, group, main_dirs, ref_dirs):
     if not main_dirs:
         return result
     if ref_dirs:
-        out_path = _out_path(cfg, group, "incr")
-        cmd = _base_cmd(cfg, group, out_path)
-        for d in main_dirs:
-            cmd += ["-d", d]
-        for r in ref_dirs:
-            cmd += ["-r", r]
-        raw = _run(cfg, group, cmd, out_path, "incremental-ref")
-        if raw is None:
+        part = _scan(cfg, group, "incr", "incremental-ref", main_dirs, ref_dirs)
+        if part is None:
             return None
-        result += _parse_groups(raw)
-    inner_out = _out_path(cfg, group, "inner")
-    cmd = _base_cmd(cfg, group, inner_out)
-    for d in main_dirs:
-        cmd += ["-d", d]
-    raw = _run(cfg, group, cmd, inner_out, "incremental-inner")
-    if raw is None:
+        result += part
+    part = _scan(cfg, group, "inner", "incremental-inner", main_dirs)
+    if part is None:
         return None
-    result += _parse_groups(raw)
-    return result
+    return result + part

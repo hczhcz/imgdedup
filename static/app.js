@@ -23,9 +23,30 @@ function loadStored(suffix, fallback) {
   catch (e) { return fallback; }
 }
 
+function persistGroup(dg) {
+  return {
+    id: dg.id,
+    level: dg.level,
+    keep_no_gap: dg.keep_no_gap,
+    hasOperations: !!dg.hasOperations,
+    files: dg.files.map((f) => ({
+      rel_path: f.rel_path,
+      md5: f.md5,
+      status: f.status,
+      is_last: f.is_last,
+      size: f.size,
+      mtime: f.mtime,
+      repo_path: f.repo_path || null,
+      repo_kind: f.repo_kind || null,
+      neighbors_prev: f.neighbors_prev || [],
+      neighbors_next: f.neighbors_next || [],
+    })),
+  };
+}
+
 function saveWorking() {
   if (state.dupgroup && state.dupgroup.hasOperations && !state.dupgroup.isCompleted)
-    localStorage.setItem(storageKey("working"), JSON.stringify(state.dupgroup));
+    localStorage.setItem(storageKey("working"), JSON.stringify(persistGroup(state.dupgroup)));
   else
     localStorage.removeItem(storageKey("working"));
 }
@@ -136,7 +157,7 @@ const showConfirm = async (text) =>
 
 function stashToCompleted(dg, hasOps) {
   const completed = completedGroups().filter((g) => g.id !== dg.id);
-  completed.push({ ...structuredClone(dg), hasOperations: hasOps });
+  completed.push({ ...persistGroup(dg), hasOperations: hasOps });
   localStorage.setItem(storageKey("completed"), JSON.stringify(completed.slice(-50)));
   localStorage.removeItem(storageKey("working"));
 }
@@ -399,10 +420,6 @@ function updateWorkingRules(dg) {
   dg.can_ignore = present.length >= 2;
 }
 
-function fileKey(f) {
-  return `${f.rel_path}\0${f.md5 || ""}`;
-}
-
 function effectiveMd5(f) {
   if (f.status === "moved" || f.status === "replaced")
     return f.fs ? f.fs.lib_md5 : null;
@@ -565,8 +582,9 @@ function updateDimHighlights(dg) {
 }
 
 function renderRow(dg, f, dupMd5s) {
+  const isDup = effectiveMd5(f) != null && dupMd5s.has(effectiveMd5(f));
   const row = document.createElement("div");
-  row.className = "dup-row" + (effectiveMd5(f) && dupMd5s.has(effectiveMd5(f)) ? " md5-dup" : "");
+  row.className = "dup-row" + (isDup ? " md5-dup" : "");
 
   const vp = document.createElement("div");
   vp.className = "dup-viewport";
@@ -611,7 +629,7 @@ function renderRow(dg, f, dupMd5s) {
   st.textContent = f.status === "moved" ? `moved here (from: ${f.moved_from})` :
     f.status + (f.repo_path ? ` (dup repo: ${f.repo_path})` : "");
   side.appendChild(st);
-  if (effectiveMd5(f) && dupMd5s.has(effectiveMd5(f))) {
+  if (isDup) {
     const em = document.createElement("div");
     em.className = "md5-flag";
     em.textContent = "exact duplicate (same md5)";
@@ -651,9 +669,7 @@ function renderRow(dg, f, dupMd5s) {
   const bMain = document.createElement("button");
   if (inRepo) {
     bMain.textContent = "Restore from dup repo";
-    bMain.onclick = () => doAction("/api/restore", {
-      ...identity(f), repo_name: f.repo_path,
-    });
+    bMain.onclick = () => restoreFromRepo(f);
   } else {
     bMain.className = "danger";
     bMain.textContent = "Move to dup repo";
@@ -692,13 +708,17 @@ function renderRow(dg, f, dupMd5s) {
 }
 
 async function doAction(path, extra) {
-  const body = { group: state.currentTab, ...extra };
-  const res = await apiPost(path, body);
+  const res = await apiPost(path, { group: state.currentTab, ...extra });
   if (await alertIfError(res)) return;
-  if (path === "/api/restore") {
-    const file = state.dupgroup.files.find((f) => fileKey(f) === `${extra.path}\0${extra.md5}`);
-    if (file) file.repo_path = null;
-  }
+  await afterOperation();
+}
+
+async function restoreFromRepo(f) {
+  const res = await apiPost("/api/restore", {
+    group: state.currentTab, ...identity(f), repo_name: f.repo_path,
+  });
+  if (await alertIfError(res)) return;
+  f.repo_path = null;
   await afterOperation();
 }
 

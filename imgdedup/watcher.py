@@ -1,4 +1,5 @@
 import ctypes
+import errno
 import os
 import select
 import struct
@@ -68,7 +69,7 @@ class Watcher:
             try:
                 LIB.add_watch(self.fd, d, IN_ALL_EVENTS)
             except OSError as e:
-                if e.errno == 28:
+                if e.errno in (errno.ENOSPC, errno.EMFILE):
                     raise
                 continue
             try:

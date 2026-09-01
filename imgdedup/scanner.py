@@ -70,9 +70,6 @@ class GroupRuntime:
     def rel(self, abs_path):
         return os.path.relpath(abs_path, self.cfg.library_root)
 
-    def file_dir(self, rel_path):
-        return os.path.dirname(rel_path)
-
     def _abs_under(self, root, rel_path, what):
         p = os.path.abspath(os.path.join(root, rel_path))
         if not self._is_under(p, root.rstrip(os.sep)):
@@ -243,7 +240,7 @@ class GroupRuntime:
             if md5 is None:
                 return None
             md5s.add(md5)
-        return frozenset(md5s) if md5s else None
+        return frozenset(md5s)
 
     def ignored_match(self, g):
         s = self.group_md5_set(g) if self.ignored_sets else None
@@ -385,8 +382,12 @@ class GroupRuntime:
 
     def repo_matches(self, repo_name, md5):
         matches = []
+        seen = set()
         for kind in ("fuzzy", "exact"):
             path = self.abs_repo(repo_name, kind)
+            if path in seen:
+                continue
+            seen.add(path)
             if os.path.isfile(path) and self.get_path_md5(path) == md5:
                 matches.append((kind, path))
         return matches
@@ -492,7 +493,7 @@ class GroupRuntime:
         with self.lock:
             self.action_seq += 1
             self._bump_version()
-            self.changed_dirs |= {self.file_dir(rp) for rp in rel_paths}
+            self.changed_dirs |= {os.path.dirname(rp) for rp in rel_paths}
         self._recompute()
         self.czkawka_wakeup.set()
 
@@ -568,7 +569,7 @@ class GroupRuntime:
         if added or removed:
             if added:
                 with self.lock:
-                    self.changed_dirs |= {self.file_dir(rp) for rp in added}
+                    self.changed_dirs |= {os.path.dirname(rp) for rp in added}
             self._recompute()
             self.czkawka_wakeup.set()
 
