@@ -37,6 +37,7 @@ function persistGroup(dg) {
       size: f.size,
       mtime: f.mtime,
       ctime: f.ctime,
+      base_t: f.base_t,
       repo_path: f.repo_path || null,
       repo_kind: f.repo_kind || null,
       neighbors_prev: f.neighbors_prev || [],
@@ -322,6 +323,7 @@ async function selectStoredGroup(group) {
   state.currentGid = group.id;
   state.dupgroup = structuredClone(group);
   state.dupgroup.isCompleted = true;
+  captureBaseline(state.dupgroup);
   state.dupJson = null;
   state.autoFollow = false;
   resetView();
@@ -350,11 +352,19 @@ async function loadDupgroup() {
     }
     state.dupgroup = data;
   }
+  captureBaseline(state.dupgroup);
   await refreshWorkingFiles();
   const json = JSON.stringify(state.dupgroup);
   if (json !== state.dupJson) {
     state.dupJson = json;
     renderMain();
+  }
+}
+
+function captureBaseline(dg) {
+  for (const f of dg.files) {
+    if (f.base_t != null) continue;
+    f.base_t = Math.max(f.mtime || 0, f.ctime || 0) || null;
   }
 }
 
@@ -417,7 +427,7 @@ function updateWorkingRules(dg) {
   const present = dg.files.filter(isPresentLike);
   const slotFilled = (f) => ["present", "replaced", "moved"].includes(f.status);
   const recent = (f) => {
-    const t = Math.max(f.mtime || 0, f.ctime || 0);
+    const t = f.base_t ?? Math.max(f.mtime || 0, f.ctime || 0);
     return t > 0 && Date.now() / 1000 - t <= 86400;
   };
   const gapsOk = !dg.keep_no_gap || dg.files.every((f) =>
