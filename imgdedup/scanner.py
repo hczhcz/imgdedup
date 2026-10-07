@@ -424,10 +424,10 @@ class GroupRuntime:
             size = os.path.getsize(src)
             kind = "exact" if (self.library_has_md5(md5, size, rel_path)
                                or self.fuzzy_has_md5(md5, size)) else "fuzzy"
-            dst = self.abs_repo(name, kind)
-            if os.path.exists(dst):
-                raise fileops.FileOpError("dst_exists", name, {"repo_kind": kind})
-            fileops.safe_move(src, dst)
+            for k in (kind, "exact" if kind == "fuzzy" else "fuzzy"):
+                if os.path.lexists(self.abs_repo(name, k)):
+                    raise fileops.FileOpError("dst_exists", name, {"repo_kind": k})
+            fileops.safe_move(src, self.abs_repo(name, kind))
             self.file_index.pop(rel_path, None)
             oplog.log("action_move_to_repo", group=self.cfg.name, file=rel_path,
                       md5=md5, repo_name=name, repo_kind=kind)
