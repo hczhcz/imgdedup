@@ -46,8 +46,8 @@ body { display: flex; flex-direction: column; overflow: hidden; }
 #main-header { flex: none; padding: 8px 12px; background: #111; border-bottom: 1px solid #333; display: flex; align-items: center; gap: 12px; }
 #btn-ignore { margin-left: auto; }
 button { background: #335; color: #ddd; border: 1px solid #557; padding: 4px 12px; cursor: pointer; border-radius: 3px; }
-button:hover:not(:disabled) { background: #446; }
-button:disabled { opacity: 0.4; cursor: default; }
+button:hover:not(:disabled):not(.pseudo-disabled) { background: #446; }
+button:disabled, button.pseudo-disabled { opacity: 0.4; cursor: default; }
 button.danger { background: #533; border-color: #755; }
 button.danger:hover:not(:disabled) { background: #644; }
 

@@ -47,7 +47,7 @@ function persistGroup(dg) {
 }
 
 function saveWorking() {
-  if (state.dupgroup && state.dupgroup.hasOperations && !state.dupgroup.isCompleted)
+  if (state.dupgroup && state.dupgroup.hasOperations)
     localStorage.setItem(storageKey("working"), JSON.stringify(persistGroup(state.dupgroup)));
   else
     localStorage.removeItem(storageKey("working"));
@@ -166,7 +166,7 @@ function stashToCompleted(dg, hasOps) {
 
 async function guardLeaveGroup() {
   const dg = state.dupgroup;
-  if (!dg || !dg.hasOperations || dg.isCompleted) return true;
+  if (!dg || !dg.hasOperations) return true;
   if (dg.can_complete) {
     stashToCompleted(dg, false);
     return true;
@@ -308,7 +308,7 @@ async function selectGroup(gid, fromAuto) {
   const working = loadStored("working", null);
   const stashed = completedGroups().find((g) => g.id === gid && g.hasOperations);
   state.dupgroup = working && working.id === gid ? working :
-    stashed ? structuredClone(stashed) : null;
+    stashed ? { ...structuredClone(stashed), hasOperations: false } : null;
   state.dupJson = null;
   resetView();
   state.carouselIdx = 0;
@@ -319,10 +319,10 @@ async function selectGroup(gid, fromAuto) {
 }
 
 async function selectStoredGroup(group) {
+  if (group.id === state.currentGid) return;
   if (!(await guardLeaveGroup())) return;
   state.currentGid = group.id;
-  state.dupgroup = structuredClone(group);
-  state.dupgroup.isCompleted = true;
+  state.dupgroup = { ...structuredClone(group), hasOperations: false };
   captureBaseline(state.dupgroup);
   state.dupJson = null;
   state.autoFollow = false;
@@ -525,8 +525,7 @@ function setupViewport(vp) {
 function renderMain() {
   const dg = state.dupgroup;
   $("group-title").textContent = dg ? `Group #${dg.id} [${dg.level}]` : "no group selected";
-  const btn = $("btn-complete");
-  btn.disabled = !dg || !dg.can_complete;
+  $("btn-complete").classList.toggle("pseudo-disabled", !dg || !dg.can_complete);
   $("btn-ignore").disabled = !dg || !dg.can_ignore;
   updateUnignoreBtn();
   const rows = $("rows");
@@ -788,6 +787,15 @@ async function moveToRepo(file, name, skipWarn) {
     repo_name: name || file.rel_path.split("/").pop(),
   };
   const res = await apiPost("/api/move_to_repo", body);
+  if (res.error === "bad_name") {
+    const newName = await showDialog({
+      text: `"${body.repo_name}" is not a valid file name. Enter a different name:`,
+      input: body.repo_name,
+      cancel: true,
+    });
+    if (newName) moveToRepo(file, newName, true);
+    return;
+  }
   if (res.error === "dst_exists") {
     const conflict = name || file.rel_path.split("/").pop();
     const kind = res.repo_kind || "fuzzy";
@@ -891,8 +899,8 @@ $("btn-unignore").onclick = async () => {
 
 $("btn-complete").onclick = async () => {
   const dg = state.dupgroup;
-  if (!dg || !dg.can_complete) return;
-  stashToCompleted(dg, false);
+  if (!dg) return;
+  if (!(await guardLeaveGroup())) return;
   const idx = state.groups.findIndex((g) => g.id === dg.id);
   const prev = state.groups.slice(0, idx < 0 ? state.groups.length : idx)
     .reverse().find((g) => g.id !== dg.id);
